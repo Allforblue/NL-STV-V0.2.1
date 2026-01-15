@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Any, List
 from core.llm.AI_client import AIClient
 
@@ -14,6 +15,22 @@ class VizEditor:
 
     def __init__(self, llm_client: AIClient):
         self.llm = llm_client
+
+    def _clean_markdown(self, text: str) -> str:
+        """
+        [新增] 去除 LLM 返回的 Markdown 代码块标记。
+        复用 CodeGenerator 中的逻辑，确保 Executor 能正确执行。
+        """
+        if not text:
+            return ""
+
+        text = text.strip()
+        # 去除开头的 ```python 或 ```
+        text = re.sub(r"^```(python)?\s*", "", text, flags=re.IGNORECASE)
+        # 去除结尾的 ```
+        text = re.sub(r"\s*```$", "", text)
+
+        return text.strip()
 
     def _get_editor_prompt(self, original_code: str, summaries: List[Dict[str, Any]]) -> str:
         return f"""
@@ -44,9 +61,12 @@ class VizEditor:
 
         # 构造交互指令描述
         interaction_desc = f"用户指令: {payload.query}\n"
-        if payload.bbox:
+
+        # 处理可能的 None 情况
+        if getattr(payload, 'bbox', None):
             interaction_desc += f"地图交互动作：框选了区域 {payload.bbox}。请针对该区域进行下钻分析。\n"
-        if payload.selected_ids:
+
+        if getattr(payload, 'selected_ids', None):
             interaction_desc += f"地图交互动作：选中了 ID 为 {payload.selected_ids} 的对象。\n"
 
         user_prompt = f"""
@@ -62,7 +82,9 @@ class VizEditor:
 """
 
         logger.info("Editing existing dashboard code for drill-down...")
-        return self.llm.chat([
+        raw_response = self.llm.chat([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ], json_mode=False)
+
+        return self._clean_markdown(raw_response)

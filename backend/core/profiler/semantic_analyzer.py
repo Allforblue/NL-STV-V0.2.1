@@ -27,10 +27,25 @@ class SemanticAnalyzer:
 
         col_stats = {}
         for col in df_preview.columns:
+            # 1. 安全获取 has_nulls (强制转为 Python bool)
+            try:
+                has_nulls = bool(df_preview[col].isnull().any())
+            except:
+                has_nulls = False
+
+            # 2. 安全获取 samples (强制转为 string list)
+            try:
+                # dropna() 后取 unique，再转 list
+                raw_samples = df_preview[col].dropna().unique()[:3].tolist()
+                # 遍历转字符串，处理 Numpy int/float/bool
+                samples = [str(x) for x in raw_samples]
+            except:
+                samples = []
+
             col_stats[col] = {
                 "dtype": str(df_preview[col].dtype),
-                "samples": df_preview[col].dropna().unique()[:3].tolist(),
-                "has_nulls": df_preview[col].isnull().any()
+                "samples": samples,
+                "has_nulls": has_nulls
             }
 
         return {
@@ -59,6 +74,7 @@ class SemanticAnalyzer:
         - ID_KEY: 唯一标识符或外键
         """
 
+        # 注意：这里调用 json.dumps 时，因为上面的防御性处理，已经不会报错了
         user_prompt = f"""
         数据文件: {fingerprint['filename']}
         行数预览: {fingerprint['rows']}
