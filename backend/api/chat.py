@@ -2,7 +2,7 @@ import traceback
 from fastapi import APIRouter, Request, HTTPException
 from core.schemas.interaction import InteractionPayload
 from core.schemas.dashboard import DashboardSchema
-# [修改] 导入单例对象 session_service，而不是类
+# 导入单例对象 session_service
 from core.services.session_service import session_service
 
 router = APIRouter()
@@ -18,27 +18,34 @@ async def handle_interaction(request: Request, payload: InteractionPayload):
     workflow = request.app.state.workflow
     session_id = payload.session_id
 
-    # 1. 获取 Session 数据
-    # [修改] 使用实例调用 get_session
-    state = session_service.get_session(session_id)
-    if not state:
+    # 1. 基础检查：Session 是否存在
+    if not session_service.get_session(session_id):
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' 不存在，请先上传数据")
 
     try:
-        # 2. 调用 Workflow
+        # 2. [关键修改] 确保数据是全量的
+        # 如果当前是采样模式，这里会触发全量加载（第一次分析时可能需要几秒钟）
+        # 如果已经是全量模式，这步会直接跳过，耗时为0
+        session_service.ensure_full_data_context(session_id)
+
+        # 3. 获取最新的 Session 数据
+        # 注意：必须在 ensure_full_data_context 之后获取，确保拿到的是 full_context
+        state = session_service.get_session(session_id)
+
+        # 4. 调用 Workflow
         # workflow 内部会自动处理语义增强(Lazy Loading)和 New/Edit 模式判断
         dashboard_json = await workflow.execute_step(
             payload=payload,
             data_summaries=state["summaries"],
-            data_context=state["data_context"],
+            data_context=state["data_context"],  # 此时这里是全量数据
             last_session_state=state.get("last_workflow_state")
         )
 
-        # 3. 更新 Session 状态
-        # [修改] 调用 update_session_metadata，传入 dashboard_json.metadata (包含 last_code, last_layout)
+        # 5. 更新 Session 状态
+        # 保存生成的代码和布局，供下一次“语义钻取”使用
         session_service.update_session_metadata(session_id, dashboard_json.metadata)
 
-        # [可选] 记录对话历史
+        # 6. 记录对话历史
         session_service.append_history(
             session_id,
             query=payload.query,
@@ -50,4 +57,5 @@ async def handle_interaction(request: Request, payload: InteractionPayload):
     except Exception as e:
         # 打印详细堆栈方便后端调试
         traceback.print_exc()
+        # 返回 500 错误给前端
         raise HTTPException(status_code=500, detail=f"Workflow Execution Error: {str(e)}")
