@@ -16,6 +16,8 @@ from core.execution.insight_extractor import InsightExtractor
 from core.schemas.dashboard import DashboardSchema, ComponentType
 from core.schemas.interaction import InteractionPayload
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,18 +164,36 @@ class AnalysisWorkflow:
             )
 
             # --- 5. 结果装配 ---
-            # 填充 Insight 组件
             for component in dashboard_plan.components:
+                # A. 处理执行结果数据
+                if component.id in exec_result.results:
+                    raw_data = exec_result.results[component.id].data
+                    # 深度清洗数据（处理 NumPy 和 Plotly JSON）
+                    clean_data = self._sanitize_data(raw_data)
+
+                    # B. 解决 UserWarning: 检查类型不匹配
+                    # 如果 clean_data 是字符串（AI 经常直接返回一段话），
+                    # 为了符合 Pydantic 的 Dict[str, Any] 约束，必须包装成字典
+                    if isinstance(clean_data, str):
+                        component.data_payload = {"content": clean_data}
+                        # 如果是 INSIGHT 类型组件，顺便存入 insight_config
+                        if component.type == ComponentType.INSIGHT and not component.insight_config:
+                            component.insight_config = {"summary": clean_data, "detail": "", "tags": []}
+                    else:
+                        component.data_payload = clean_data
+
+                # C. 填充智能洞察结论
                 if component.type == ComponentType.INSIGHT:
-                    component.insight_config = insight_card
-                # 注意：实际的图表数据 (exec_result.results) 通常由 API 层单独返回或在此处挂载
-                # 这里为了 schema 简洁，假设数据通过另外的接口获取，或者前端直接根据 ID 渲染
+                    # 确保生成的洞察卡片也是干净的数据
+                    component.insight_config = self._sanitize_data(insight_card)
 
             # --- 6. 状态保存 ---
+            print(current_code)
+            # 关键：metadata 里的 execution_summary 往往包含统计值（NumPy 类型最多的地方），必须清洗
             dashboard_plan.metadata = {
                 "last_code": current_code,
-                "last_layout": dashboard_plan.model_dump(),  # Pydantic V2 推荐用法
-                "execution_summary": exec_result.global_insight_data
+                "last_layout": dashboard_plan.model_dump(),
+                "execution_summary": self._sanitize_data(exec_result.global_insight_data)
             }
 
             return dashboard_plan
@@ -181,3 +201,51 @@ class AnalysisWorkflow:
         except Exception as e:
             logger.error(f"Workflow Critical Error: {traceback.format_exc()}")
             raise e
+
+    # 在 AnalysisWorkflow 类中添加一个私有方法（建议放在 __init__ 之后或文件末尾）
+    def _sanitize_numpy(self, obj: Any) -> Any:
+        """递归将对象中的 NumPy 类型转换为 Python 原生类型"""
+        if isinstance(obj, (np.ndarray, np.generic)):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj.item()
+        elif isinstance(obj, dict):
+            return {k: self._sanitize_numpy(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._sanitize_numpy(i) for i in obj]
+        return obj
+
+    def _sanitize_data(self, obj: Any) -> Any:
+        """
+        深度递归清洗数据：
+        1. 处理 NumPy 类型
+        2. 处理 Plotly 对象
+        3. [新增] 处理 Pandas DataFrame / GeoDataFrame
+        """
+        # 1. 处理 Pandas DataFrame (包括 GeoDataFrame)
+        if hasattr(obj, "to_dict"):
+            try:
+                # 优先尝试转为记录列表 [{'col1': 1, 'col2': 'a'}, ...]
+                # 这种格式前端最容易渲染表格
+                return self._sanitize_data(obj.to_dict(orient='records'))
+            except:
+                # 如果失败 (比如 Series)，尝试默认转换
+                return self._sanitize_data(obj.to_dict())
+
+        # 2. 处理 NumPy 类型
+        if isinstance(obj, (np.ndarray, np.generic)):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj.item()
+
+        # 3. 处理 Plotly 对象
+        elif hasattr(obj, "to_plotly_json"):
+            return self._sanitize_data(obj.to_plotly_json())
+
+        # 4. 递归处理容器
+        elif isinstance(obj, dict):
+            return {k: self._sanitize_data(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._sanitize_data(i) for i in obj]
+
+        return obj
