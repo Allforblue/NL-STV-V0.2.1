@@ -1,7 +1,9 @@
 import logging
 import re
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List
 from core.llm.AI_client import AIClient
+# [新增] 引入 Scaffold
+from core.generation.scaffold import STChartScaffold
 
 logger = logging.getLogger(__name__)
 
@@ -9,31 +11,22 @@ logger = logging.getLogger(__name__)
 class CodeGenerator:
     """
     代码生成器：
-    负责生成符合 get_dashboard_data(data_context) 协议的 Python 代码。
+    利用 STChartScaffold 的食谱生成高质量绘图代码。
     """
 
     def __init__(self, llm_client: AIClient):
         self.llm = llm_client
+        # [新增] 实例化脚手架
+        self.scaffold = STChartScaffold()
 
     def _clean_markdown(self, text: str) -> str:
-        """
-        [关键修复] 健壮的代码提取逻辑
-        不再只是去除首尾标记，而是正则匹配提取代码块内容，丢弃所有 LLM 的废话。
-        """
+        """正则提取代码块"""
         if not text:
             return ""
-
-        # 1. 尝试匹配 ```python ... ``` (包含换行)
-        # re.DOTALL 让 . 匹配换行符
         pattern = r"```(?:python)?\s*(.*?)```"
         match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-
         if match:
-            # 提取中间的内容并去空格
             return match.group(1).strip()
-
-        # 2. 如果没找到代码块标记，尝试直接清洗首尾（兜底）
-        # 有时候 LLM 可能会忘记写结尾的 ```
         text = text.strip()
         text = re.sub(r"^```(python)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
@@ -47,7 +40,7 @@ class CodeGenerator:
             interaction_hint: str = ""
     ) -> str:
 
-        # 1. 构建变量背景
+        # 1. 构建数据背景字符串 (Context)
         context_str = ""
         for s in summaries:
             var_name = s.get('variable_name')
@@ -55,52 +48,45 @@ class CodeGenerator:
             cols = list(stats.get('column_stats', {}).keys())
             context_str += f"- 变量 `{var_name}` 可用列: {cols[:50]}\n"
 
-        # 2. 构建组件需求
+        # 2. [修改] 从 Scaffold 获取 System Prompt (包含 Recipes)
+        system_prompt = self.scaffold.get_system_prompt(context_str)
+
+        # 3. 构建用户需求
         comp_desc = ""
         if component_plans:
             for comp in component_plans:
                 if isinstance(comp, dict):
-                    c_id = comp.get('id')
-                    c_type = comp.get('type')
-                    c_title = comp.get('title')
+                    c_id, c_type, c_title = comp.get('id'), comp.get('type'), comp.get('title')
+                    c_conf = comp.get('chart_config', {})
                 else:
                     c_id = getattr(comp, 'id', 'unknown')
                     c_type = getattr(comp, 'type', 'unknown')
                     c_title = getattr(comp, 'title', 'unknown')
+                    c_conf = getattr(comp, 'chart_config', {})
 
-                comp_desc += f"- 组件ID: `{c_id}` ({c_type}), 标题: {c_title}\n"
+                # 如果是 Chart 类型，把 chart_type 也传进去 (方便识别是用 Bar 还是 Pie)
+                chart_type_hint = ""
+                if c_type == 'chart' and c_conf:
+                    # chart_config 可能是 dict 或 object
+                    ctype = c_conf.get('chart_type') if isinstance(c_conf, dict) else getattr(c_conf, 'chart_type', '')
+                    chart_type_hint = f" (Preferred Chart Type: {ctype})"
 
-        system_prompt = f"""
-        你是时空数据分析专家。请编写 Python 代码以生成看板数据。
-
-        === 数据环境 ===
-        {context_str}
-
-        === 强制约束 (CRITICAL) ===
-        1. 函数签名：必须定义为 `def get_dashboard_data(data_context):`。
-        2. 数据访问：`data_context` 是一个字典(Dict)。
-           - ❌ 错误写法: `df = data_context.df_name`
-           - ✅ 正确写法: `df = data_context['df_name']`
-        3. 必须显式导入所有库：
-           - `import pandas as pd`, `import geopandas as gpd`, `import plotly.express as px`
-           - `import numpy as np`, `import random`, `import json`
-           - `from shapely.geometry import Point, Polygon`
-        4. 返回格式：必须返回 Dict，Key是组件ID，Value是 Figure 或 DataFrame。
-        """
+                comp_desc += f"- 组件ID: `{c_id}` ({c_type}){chart_type_hint}, 标题: {c_title}\n"
 
         user_prompt = f"""
-        用户需求: "{query}"
+        User Query: "{query}"
 
-        === 看板组件清单 ===
+        === DASHBOARD COMPONENTS TO IMPLEMENT ===
         {comp_desc}
 
-        === 交互/关联提示 ===
+        === INTERACTION HINTS ===
         {interaction_hint}
 
-        请编写完整的 Python 代码块。不要包含任何解释性文字。
+        Please write the `get_dashboard_data` function. 
+        Apply the Recipes (A/B/C/D) that best fit each component.
         """
 
-        logger.info(f"Generating code for {len(component_plans)} components...")
+        logger.info(f"Generating code with Scaffold for {len(component_plans)} components...")
         raw_response = self.llm.chat([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -110,28 +96,28 @@ class CodeGenerator:
 
     def fix_code(self, original_code: str, error_trace: str, summaries: List[Dict[str, Any]]) -> str:
         """自愈修复逻辑"""
-        system_prompt = "你是 Python 代码修复专家。"
+        # 修复时也可以带上 scaffold 的规则，防止越修越错
+        base_prompt = self.scaffold.get_system_prompt("")  # 空 context 仅获取规则
 
         fix_prompt = f"""
-        代码执行失败。
+        CODE EXECUTION FAILED.
 
-        === 错误堆栈 ===
+        === ERROR TRACEBACK ===
         {error_trace}
 
-        === 原始代码 ===
+        === ORIGINAL CODE ===
         {original_code}
 
-        === 修复指南 ===
-        1. 如果是 AttributeError: 'dict' object has no attribute... -> 请改用 `data_context['key']` 访问。
-        2. 如果是 NameError -> 请检查 import。
-        3. 如果是 SyntaxError -> 请检查是否包含非代码文本。
-
-        请返回修复后的完整代码。只返回代码块。
+        === FIX INSTRUCTIONS ===
+        1. Check imports (numpy, shapely, etc).
+        2. Check dictionary access (`data_context['key']`).
+        3. Check for empty/NaN data before plotting.
+        4. Return the FIXED complete code block.
         """
 
-        logger.warning("Attempting to fix code...")
+        logger.warning("Attempting to fix code with Scaffold rules...")
         raw_response = self.llm.chat([
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": base_prompt},
             {"role": "user", "content": fix_prompt}
         ], json_mode=False)
 
