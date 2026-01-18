@@ -116,10 +116,18 @@ class CodeExecutor:
 
                     try:
                         # 3.1 DataFrame 特征提取
-                        if hasattr(res_obj, 'describe'):
-                            desc = res_obj.describe(include='all').to_dict()
-                            # 过滤掉全是 NaN 的列
-                            summary = {k: v for k, v in desc.items() if isinstance(v, dict)}
+                        if hasattr(res_obj, 'to_dict'):  # 兼容 DataFrame 和 Series
+                            try:
+                                # 如果数据量很小（比如 < 100 行），直接全量提取！
+                                # 这对于 Insight 非常关键
+                                if len(res_obj) < 100:
+                                    summary = res_obj.to_dict()
+                                else:
+                                    # 数据量大才做 describe
+                                    desc = res_obj.describe(include='all').to_dict()
+                                    summary = {k: v for k, v in desc.items() if isinstance(v, dict)}
+                            except:
+                                pass
 
                         # 3.2 Plotly Figure 特征提取
                         elif hasattr(res_obj, 'data') and len(res_obj.data) > 0:
