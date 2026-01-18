@@ -1,6 +1,10 @@
 ### 项目是NL-STV_test的升级版本
 原项目链接：https://github.com/Allforblue/NL-STV_test.git
 
+### 基于LLM的时空数据可视化平台NL-STV
+版本号：0.2.1
+
+
 ### 全新架构
 前后端分离：
 - 后端：FastAPI
