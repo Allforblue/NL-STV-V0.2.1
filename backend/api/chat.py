@@ -28,12 +28,12 @@ async def handle_interaction(request: Request, payload: InteractionPayload):
         # 如果已经是全量模式，这步会直接跳过，耗时为0
         session_service.ensure_full_data_context(session_id)
 
-        # 3. 获取最新的 Session 数据
-        # 注意：必须在 ensure_full_data_context 之后获取，确保拿到的是 full_context
+        # 3. [关键修改] 获取最新的 Session 数据
+        # 注意：必须在 ensure_full_data_context 之后重新获取 state，
+        # 否则拿到的 state["data_context"] 还是旧的采样数据引用
         state = session_service.get_session(session_id)
 
         # 4. 调用 Workflow
-        # workflow 内部会自动处理语义增强(Lazy Loading)和 New/Edit 模式判断
         dashboard_json = await workflow.execute_step(
             payload=payload,
             data_summaries=state["summaries"],
@@ -42,7 +42,6 @@ async def handle_interaction(request: Request, payload: InteractionPayload):
         )
 
         # 5. 更新 Session 状态
-        # 保存生成的代码和布局，供下一次“语义钻取”使用
         session_service.update_session_metadata(session_id, dashboard_json.metadata)
 
         # 6. 记录对话历史
@@ -57,5 +56,4 @@ async def handle_interaction(request: Request, payload: InteractionPayload):
     except Exception as e:
         # 打印详细堆栈方便后端调试
         traceback.print_exc()
-        # 返回 500 错误给前端
         raise HTTPException(status_code=500, detail=f"Workflow Execution Error: {str(e)}")
