@@ -67,15 +67,17 @@ class DashboardComponent(BaseModel):
     title: str
     type: ComponentType
     layout: LayoutConfig
-    # 根据 type 不同，填充不同的配置
+
+    # [关键修改] 允许 Dict (Plotly), List (DataFrame records), str (Text)
+    data_payload: Optional[Union[Dict[str, Any], List[Any], str]] = None
+
     map_config: Optional[List[MapLayerConfig]] = None
     chart_config: Optional[ChartConfig] = None
     insight_config: Optional[InsightCard] = None
 
-    # 联动元数据
     interactions: List[str] = Field(
         default_factory=list,
-        description="该组件支持的交互行为列表，如 ['bbox_filter', 'click_highlight']"
+        description="该组件支持的交互行为列表"
     )
 
 
