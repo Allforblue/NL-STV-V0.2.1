@@ -1,180 +1,153 @@
 from typing import List, Dict, Any
+import json
 
 
 class STChartScaffold:
     """
-    Spatio-Temporal Chart Scaffold
+    Spatio-Temporal Chart Scaffold (V2 - Dashboard Ready)
     管理时空可视化的 Prompt 模板、专家规则和代码食谱 (Recipes)。
     """
 
     def __init__(self):
-        # 通用 GIS 处理指令 (经过强化和去重)
+        # 1. 通用 GIS 与 绘图指令 (融合了之前的稳定规则和新的修复逻辑)
         self.common_gis_instructions = """
         [CRITICAL RULES - READ CAREFULLY]
-        1. **NO DISK I/O**: `data_context` ALREADY contains loaded DataFrame/GeoDataFrame OBJECTS. 
-           - NEVER write `pd.read_csv(...)` or `gpd.read_file(...)`.
-           - CORRECT USAGE: `df = data_context['df_variable_name']`.
+        1. **NO DISK I/O**: `data_context` ALREADY contains loaded objects. 
+           - ❌ `pd.read_csv(...)` 
+           - ✅ `df = data_context['df_variable_name']`
 
-        2. **CASE SENSITIVITY**: Pandas is case-sensitive! 
-           - NYC Data usually uses capitalized names: 'Zone', 'Borough', 'LocationID'.
-           - ERROR: 'zone' -> CORRECT: 'Zone'.
-           - Check the 'AVAILABLE DATASETS' list for exact column names.
+        2. **IMPORTS**: You MUST explicitly import ALL libraries used.
+           - `import pandas as pd`, `import geopandas as gpd`
+           - `import plotly.express as px`, `import numpy as np`
+           - `import json`, `import random`
+           - `from shapely.geometry import Point, Polygon`
 
-        3. **GEOMETRY SOURCE**: 
-           - To plot a map, you MUST use the GeoDataFrame (loaded from Shapefile), NOT the lookup CSV.
-           - The lookup CSV (e.g., taxi_zone_lookup) has NO geometry column.
-           - Logic: Aggregate data -> Merge into GeoDataFrame -> Plot GeoDataFrame.
+        3. **DATA CLEANING (Anti-Crash)**:
+           - Before plotting, DROP NaNs: `df = df.dropna(subset=['col_x', 'col_y'])`.
+           - For Bar/Line/Pie: FILTER out <=0 values if log scale or ratio is used: `df = df[df['value'] > 0]`.
+           - This prevents frontend "Infinity" errors.
 
-        4. **NO MOCK DATA / NO EXTRA CODE**: 
-           - DO NOT include `data_context = ...` or example usage at the bottom of the script.
-           - ONLY define the `def plot(data_context):` function.
-           - The system will call the function automatically.
+        4. **MAP GEOMETRY (Choropleth)**: 
+           - Use `px.choropleth_mapbox`.
+           - **CRITICAL**: Ensure data alignment!
+             ```python
+             gdf = gdf.to_crs(epsg=4326) # Must be WGS84
+             gdf = gdf.reset_index(drop=True) # Reset index to 0,1,2...
+             fig = px.choropleth_mapbox(
+                 gdf, geojson=gdf.geometry, 
+                 locations=gdf.index, # Match by index
+                 ...
+             )
+             ```
 
-        5. **Coordinate System**: Plotly Mapbox REQUIRES WGS84 (EPSG:4326). 
-           - EXECUTE: `gdf = gdf.to_crs(epsg=4326)` BEFORE plotting.
+        5. **BAR CHART LAYOUT**: 
+           - For horizontal bars (`orientation='h'`), construct a UNIQUE y-axis label to avoid stacking.
+           - Example: `df['label'] = df['Zone'] + " (" + df['ID'].astype(str) + ")"`
+           - Layout: `fig.update_layout(margin=dict(l=150), yaxis=dict(automargin=True))`
 
-        6. **Map Matching**: 
-           - When using `px.choropleth_mapbox`, Plotly matches `locations` against the GeoJSON feature IDs.
-           - CRITICAL STEP: Set the matching column as index: `gdf = gdf.set_index('LocationID')`.
-           - Then use: `locations=gdf.index`.
-
-        7. **Map Style**: ALWAYS set `mapbox_style="carto-positron"` (no token needed).
-
-        8. **ANIMATION SORTING (CRITICAL)**: 
-           - Sampling (`df.sample()`) shuffles data!
-           - You MUST sort the dataframe by the animation column (`sort_values()`) AFTER sampling and IMMEDIATELY BEFORE plotting.
-           - Otherwise, the timeline will be chaotic.
+        6. **RETURN FORMAT**: 
+           - Function must be `def get_dashboard_data(data_context):`.
+           - Return a `dict` where keys are Component IDs (e.g., 'map_1') and values are Figures/DataFrames.
+           
+        7. **INSIGHT DATA (CRITICAL)**: 
+           - For the component with `type='insight'`, you MUST return a small `pd.DataFrame` containing the key metrics derived from your analysis.
+           - DO NOT return a string/text. Return the DATA so the backend can generate the text.
+           - Example:
+             ```python
+             df_insight = pd.DataFrame({
+                 "Metric": ["Top Zone", "Total Orders"],
+                 "Value": ["JFK", 15000]
+             })
+             return { "map_1": fig, "insight_1": df_insight }
+             ```
+        
+        8. **MAP TOOLTIPS**:
+           - Always set `hover_name='Zone'` (or the name column).
+           - Always set `hover_data=['Borough', 'value_column']`.
+           - Do not let the map show "index=..." in the tooltip.
         """
 
-    def get_template(self, library: str = "plotly") -> str:
-        """返回 Python 代码的骨架 (Skeleton)"""
-        if library == "plotly":
-            return """
-import plotly.express as px
-import pandas as pd
-import geopandas as gpd
-
-def plot(data_context: dict):
-    # 1. Extract DataFrames (Use exact keys from Available Datasets)
-    # Example: df_trips = data_context['df_trips']
-
-    # <stub> 
-    # (Write your data processing and plotting code here)
-
-    return fig
-"""
-        return ""
-
-    def get_system_prompt(self, summaries: List[Dict[str, Any]]) -> str:
+    def get_system_prompt(self, context_str: str) -> str:
         """构建包含“食谱”的系统提示词"""
 
-        # 1. 构建数据上下文描述
-        context_descriptions = []
-        for summary in summaries:
-            var_name = summary.get('variable_name', 'df')
-            file_name = summary.get('file_info', {}).get('name', 'unknown')
-
-            # 提取列信息
-            cols = []
-            stats = summary.get("basic_stats", {}).get("column_stats", {})
-            tags = summary.get("semantic_analysis", {}).get("semantic_tags", {})
-            for col, info in stats.items():
-                tag = tags.get(col, "UNKNOWN")
-                cols.append(f"  - {col} ({info.get('dtype')}, {tag})")
-
-            desc = f"DataFrame `{var_name}` (Source: {file_name}):\n" + "\n".join(cols)
-            context_descriptions.append(desc)
-
-        full_context = "\n\n".join(context_descriptions)
-
-        # 2. 构建 Prompt
         prompt = f"""
         You are an expert Python GIS Data Analyst. 
-        Your task is to complete the `plot(data_context)` function to visualize data using `plotly.express`.
+        Your task is to complete the `get_dashboard_data(data_context)` function to visualize data using `plotly.express`.
 
-        === AVAILABLE DATASETS (in `data_context`) ===
-        {full_context}
+        === DATA ENVIRONMENT ===
+        {context_str}
 
         {self.common_gis_instructions}
 
         === RECIPES (Reference Patterns) ===
 
         [Recipe A: Choropleth Map / Region Heatmap]
-        Target: "Show total value per zone"
-        Strategy: GroupBy -> Merge with Shapefile -> to_crs(4326) -> set_index -> Choropleth
+        Target: "Show value per zone on map"
+        Strategy: GroupBy -> Merge with GeoDataFrame -> Reset Index -> Plot
         Code:
         ```python
-        def plot(data_context):
-            # 1. Extract (Use keys from Available Datasets)
-            df_trips = data_context['df_trips']
-            df_zones = data_context['df_zones'] # Expecting GeoDataFrame
-
-            # 2. Aggregate
-            # Note: Using LocationID for grouping is safer than names
-            df_agg = df_trips.groupby('PULocationID')['fare_amount'].sum().reset_index()
-
-            # 3. Merge (Left merge on GeoDataFrame to keep geometry)
-            # Ensure columns match (e.g. LocationID vs PULocationID)
-            df_map = df_zones.merge(df_agg, left_on='LocationID', right_on='PULocationID', how='left')
-
-            # 4. Transform CRS (CRITICAL!)
-            df_map = df_map.to_crs(epsg=4326)
-
-            # 5. Set Index for Map Matching (CRITICAL!)
-            # Plotly uses the index to match geojson features
-            df_map = df_map.set_index('LocationID')
-
-            # 6. Plot
-            fig = px.choropleth_mapbox(
-                df_map, 
-                geojson=df_map.geometry, 
-                locations=df_map.index, # Use index
-                color='fare_amount', 
-                mapbox_style="carto-positron", 
-                center={{"lat": 40.7, "lon": -74.0}},
-                zoom=10,
-                opacity=0.6,
-                title="Total Fare by Zone"
-            )
-            return fig
+        # ... (Merge logic) ...
+        # Ensure 'Zone' and 'Borough' columns exist in gdf_map for tooltip
+        gdf_map = gdf_zones.merge(df_agg, on='LocationID', how='left')
+        gdf_map = gdf_map.to_crs(epsg=4326)
+        gdf_map = gdf_map.reset_index(drop=True) 
+        
+        fig = px.choropleth_mapbox(
+            gdf_map, 
+            geojson=gdf_map.geometry, 
+            locations=gdf_map.index,
+            color='value_col', 
+            # [CRITICAL] Set hover info to show real names, not index
+            hover_name='Zone', 
+            hover_data=['Borough', 'value_col'],
+            mapbox_style="carto-positron", 
+            zoom=10, 
+            opacity=0.6
+        )
         ```
 
-        [Recipe B: Density Heatmap / Hotspots]
-        Target: "Where are the pickups concentrated?"
-        Strategy: Use density_mapbox on Lat/Lon columns
+        [Recipe B: Scatter Mapbox]
+        Target: "Show points (pickups/dropoffs)"
+        Strategy: Sample (if large) -> Plot
         Code:
         ```python
-        def plot(data_context):
-            df = data_context['df_trips']
-            # No sampling needed for density map usually
-            fig = px.density_mapbox(
-                df, lat='pickup_latitude', lon='pickup_longitude',
-                radius=15, mapbox_style="carto-positron", zoom=10
-            )
-            return fig
+        if len(df) > 10000: df = df.sample(10000)
+        fig = px.scatter_mapbox(df, lat='lat', lon='lon', color='val', size='val', mapbox_style="carto-positron")
         ```
 
-        [Recipe C: Point Scatter / Bubble Map]
-        Target: "Show pickups colored by time"
-        Strategy: Sample -> scatter_mapbox
+        [Recipe C: Bar Chart (Rankings)]
+        Target: "Top 10 Zones by Orders"
+        Strategy: GroupBy -> Sort -> Head(10) -> Unique Label -> Plot
         Code:
         ```python
-        def plot(data_context):
-            df = data_context['df_trips']
-            # CRITICAL: Sample to avoid browser crash
-            if len(df) > 20000: df = df.sample(20000)
+        df_agg = df.groupby('Zone')['count'].sum().reset_index().sort_values('count', ascending=True).tail(10)
+        fig = px.bar(df_agg, x='count', y='Zone', orientation='h')
+        fig.update_yaxes(type='category') # Prevent hiding labels
+        fig.update_layout(margin=dict(l=150))
+        ```
 
-            fig = px.scatter_mapbox(
-                df, lat='pickup_latitude', lon='pickup_longitude',
-                color='tpep_pickup_datetime', size='fare_amount',
-                mapbox_style="carto-positron"
-            )
-            return fig
+        [Recipe D: Pie Chart (Composition)]
+        Target: "Distribution of Payment Types" or "Share of Boroughs"
+        Strategy: GroupBy -> Sort -> Head(Limit Slices) -> Pie
+        Code:
+        ```python
+        # Limit to top 8 slices, group others to 'Other' (optional logic, but simple top n is safer)
+        df_pie = df['Borough'].value_counts().reset_index().head(8)
+        df_pie.columns = ['label', 'value']
+
+        fig = px.pie(
+            df_pie, 
+            names='label', 
+            values='value', 
+            title='Distribution of Boroughs',
+            hole=0.4 # Donut chart looks better
+        )
+        fig.update_traces(textposition='inside', textinfo='percent+label')
         ```
 
         === INSTRUCTIONS ===
-        1. Access dataframes via `data_context['var_name']`.
-        2. Merge dataframes if needed.
-        3. Return ONLY the python code inside the markdown block.
+        1. Analyze the `component_plans` in the User Prompt.
+        2. Select the best Recipe for each component type (Map->A/B, Chart->C/D).
+        3. Write the COMPLETE code.
         """
         return prompt
