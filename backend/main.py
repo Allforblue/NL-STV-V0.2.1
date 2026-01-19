@@ -5,15 +5,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-# --- 导入核心模块 ---
-# 确保你的 Python 环境能找到这些包 (在 backend 目录下运行)
+# --- 核心模块导入 ---
 from api import chat, data, session
 from core.llm.AI_client import AIClient
 from core.services.workflow import AnalysisWorkflow
-
-# --- 配置 ---
-# 【重要】请在这里填入你的 DeepSeek API Key，或者设置环境变量 DEEPSEEK_API_KEY
-# API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+# [建议新增] 导入以确保启动时日志能记录 session 系统状态
+from core.services.session_service import session_service
 
 # --- 日志配置 ---
 logging.basicConfig(
@@ -23,7 +20,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- 路径配置 ---
-# 获取 backend 目录的绝对路径，确保在任何地方启动都能找到 sandbox
 BASE_DIR = Path(__file__).resolve().parent
 SANDBOX_PATH = BASE_DIR / "core" / "data_sandbox"
 
@@ -34,53 +30,56 @@ async def lifespan(app: FastAPI):
     """
     在应用启动时初始化资源，在关闭时清理
     """
-    logger.info(">>> 正在启动 NL-STV 后端服务...")
+    logger.info(">>> [NL-STV V2.1] 正在启动高交互时空数据分析后端...")
 
-    # 1. 确保数据沙箱目录存在 (使用绝对路径)
+    # 1. 确保数据沙箱目录存在
     if not SANDBOX_PATH.exists():
         SANDBOX_PATH.mkdir(parents=True, exist_ok=True)
         logger.info(f"已创建数据沙箱: {SANDBOX_PATH}")
 
-    # 2. 初始化核心工作流并注入到 app 状态中
+    # 2. 初始化核心工作流
     try:
-        # 检查 API Key
-        # if not API_KEY or API_KEY.startswith("sk-xxx"):
-        #     logger.warning(
-        #         "⚠️  检测到可能无效的 API Key。请在 main.py 或环境变量中配置真实 Key，否则 LLM 功能将无法使用。")
+        # 获取环境变量中的 Key (建议正式开发使用环境变量)
+        # api_key = os.getenv("DEEPSEEK_API_KEY", "sk-60160407beb64fb989638a7e1aaadf12")  # 也可以保持你之前的硬编码测试
 
         # 初始化 LLM 客户端
         client = AIClient(model_name="deepseek-chat")
 
-        # 简单的连通性测试 (可选)
+        # 连通性检查
         if not client.is_alive():
-            logger.warning("⚠️  无法连接到 DeepSeek API，请检查网络或 Key。")
+            logger.error("❌ 无法连接到 DeepSeek API，请检查网络或 API Key！")
+        else:
+            logger.info("✅ DeepSeek API 连接成功")
 
-        # 初始化工作流
+        # [核心] 初始化新版 AnalysisWorkflow 并挂载
+        # 现在的 Workflow 内部已经集成了 InteractionMapper 和新版 Planner
         app.state.workflow = AnalysisWorkflow(client)
-        logger.info("✅ 核心引擎 (AnalysisWorkflow) 挂载成功")
+        logger.info("✅ 高交互分析引擎 (AnalysisWorkflow V2) 挂载成功")
 
     except Exception as e:
         logger.error(f"❌ 初始化核心工作流失败: {e}")
-        # 这里可以选择 raise e 强制停止启动，也可以仅记录日志
+        import traceback
+        traceback.print_exc()
         raise e
 
     yield
 
-    logger.info(">>> 正在关闭 NL-STV 后端服务...")
+    # 3. 停止时的清理 (如有必要可清理内存 Session)
+    logger.info(">>> 正在关闭 NL-STV 后端服务，执行内存清理...")
 
 
 # --- 创建 FastAPI 实例 ---
 app = FastAPI(
     title="NL-STV Platform API",
-    description="基于 LLM 驱动的多维时空数据智能分析与交互看板后端",
+    description="LLM 驱动的高交互时空分析平台后端 - 支持快照回溯与多图联动",
     version="2.1.0",
     lifespan=lifespan
 )
 
 # --- 配置跨域 (CORS) ---
+# 时空数据展示常涉及大量地理坐标 JSON，确保 CORS 允许必要的头信息
 app.add_middleware(
     CORSMiddleware,
-    # 允许所有源，生产环境建议改为 ["http://localhost:5173", "http://your-frontend-domain"]
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -88,7 +87,6 @@ app.add_middleware(
 )
 
 # --- 挂载 API 路由 ---
-# 对应 data.py, chat.py, session.py
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["智能对话与看板"])
 app.include_router(data.router, prefix="/api/v1/data", tags=["数据管理"])
 app.include_router(session.router, prefix="/api/v1/session", tags=["会话管理"])
@@ -99,15 +97,14 @@ app.include_router(session.router, prefix="/api/v1/session", tags=["会话管理
 async def root():
     return {
         "status": "online",
-        "service": "NL-STV Backend",
+        "service": "NL-STV Backend (High-Interaction)",
         "version": "2.1.0",
-        "docs_url": "http://localhost:8000/docs"
+        "features": ["Snapshot Backtrack", "UI Interaction Mapping", "Template-driven Layout"]
     }
 
 
-# --- 启动入口 ---
 if __name__ == "__main__":
     import uvicorn
 
-    # 确保 host="0.0.0.0" 以便局域网访问，reload=True 方便开发调试
+    # reload=True 适合开发环境。正式部署建议关闭。
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
