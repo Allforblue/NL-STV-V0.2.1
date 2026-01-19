@@ -3,163 +3,197 @@ import requests
 import json
 import uuid
 import plotly.graph_objects as go
+from datetime import datetime
 
 # --- 配置 ---
-st.set_page_config(layout="wide", page_title="NL-STV 原型测试")
+st.set_page_config(layout="wide", page_title="NL-STV Pro - 高交互时空分析平台")
 API_BASE_URL = "http://localhost:8000/api/v1"
 
-# --- Session 初始化 ---
+# --- Session 状态初始化 ---
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-    st.session_state.messages = []  # 存储对话历史
+    st.session_state.current_dashboard = None  # 当前显示的看板快照
+    st.session_state.history = []  # 左侧历史快照列表
     st.session_state.uploaded = False
 
-# --- 侧边栏：数据上传 ---
+
+# --- 工具函数：调用后端接口 ---
+def call_interact(payload):
+    try:
+        resp = requests.post(f"{API_BASE_URL}/chat/interact", json=payload)
+        if resp.status_code == 200:
+            st.session_state.current_dashboard = resp.json()
+            # 每次交互完，刷新历史列表
+            update_history_list()
+            st.rerun()
+        else:
+            st.error(f"分析失败: {resp.text}")
+    except Exception as e:
+        st.error(f"连接失败: {e}")
+
+
+def update_history_list():
+    try:
+        resp = requests.get(f"{API_BASE_URL}/session/{st.session_state.session_id}/history")
+        if resp.status_code == 200:
+            st.session_state.history = resp.json().get("history", [])
+    except:
+        pass
+
+
+def render_visual_component(comp, height=400):
+    """
+    通用组件渲染器：具备高度容错性
+    处理 Plotly 非法属性导致的 ValueError，并在失败时尝试渲染为数据表格
+    """
+    payload = comp.get("data_payload")
+    if not payload:
+        st.warning("暂无数据载荷")
+        return
+
+    try:
+        # 1. 尝试作为 Plotly 图表渲染 (处理 Dict 类型的 payload)
+        if isinstance(payload, dict) and ("data" in payload or "layout" in payload):
+            fig = go.Figure(payload)
+            fig.update_layout(height=height, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, use_container_width=True, key=f"viz_{comp['id']}")
+
+        # 2. 尝试作为数据表格渲染 (处理 List 类型的 payload，即 DataFrame records)
+        elif isinstance(payload, list):
+            st.dataframe(payload, use_container_width=True, height=height)
+
+        # 3. 兜底：如果是字符串或未知字典
+        else:
+            st.write(payload)
+
+    except Exception as e:
+        # 容错处理：如果 Plotly 包含非法参数(如幻觉出的中文属性)，降级为表格显示
+        st.error(f"组件渲染异常: {e}")
+        with st.expander("查看原始数据 (降级展示)"):
+            if isinstance(payload, (list, dict)):
+                st.write("后端返回的数据结构不符合 Plotly 标准，已转为表格形式：")
+                st.dataframe(payload)
+            else:
+                st.code(str(payload))
+
+
+# --- 侧边栏：文件上传 + 历史记录 (回溯核心) ---
 with st.sidebar:
-    st.title("📂 数据接入")
-    st.caption(f"Session ID: `{st.session_state.session_id}`")
+    st.title("🛰️ NL-STV 控制台")
+    st.caption(f"会话 ID: `{st.session_state.session_id}`")
 
-    uploaded_files = st.file_uploader(
-        "上传 CSV / Parquet / Shapefile (需同时上传 shp/shx/dbf)",
-        accept_multiple_files=True
-    )
+    # 1. 数据上传区
+    with st.expander("📂 数据上传", expanded=not st.session_state.uploaded):
+        uploaded_files = st.file_uploader("上传 CSV / Parquet / Shapefile", accept_multiple_files=True)
+        if uploaded_files and st.button("初始化环境"):
+            files_list = [('files', (f.name, f, f.type)) for f in uploaded_files]
+            resp = requests.post(f"{API_BASE_URL}/data/upload", params={"session_id": st.session_state.session_id},
+                                 files=files_list)
+            if resp.status_code == 200:
+                st.session_state.uploaded = True
+                st.success("数据已就绪")
+                update_history_list()
 
-    if uploaded_files and st.button("🚀 开始上传并初始化"):
-        with st.spinner("正在上传并预处理数据 (采样模式)..."):
-            # 构造 Multipart/form-data
-            files_list = []
-            for f in uploaded_files:
-                # requests 处理文件上传的格式: (field_name, (filename, file_obj, content_type))
-                files_list.append(('files', (f.name, f, f.type)))
-
-            try:
-                resp = requests.post(
-                    f"{API_BASE_URL}/data/upload",
-                    params={"session_id": st.session_state.session_id},
-                    files=files_list
-                )
-
-                if resp.status_code == 200:
-                    st.success(f"✅ 上传成功！后端已接收 {len(uploaded_files)} 个文件。")
-                    st.session_state.uploaded = True
-
-                    # 展示简单的文件摘要
-                    data = resp.json()
-                    if "summaries" in data:
-                        with st.expander("查看数据摘要"):
-                            st.json(data["summaries"])
-                else:
-                    st.error(f"上传失败: {resp.text}")
-            except Exception as e:
-                st.error(f"连接后端失败: {e}")
-
-# --- 主界面：智能对话 ---
-st.title("🤖 NL-STV 智能时空分析平台")
-
-# 1. 展示历史消息
-# [关键修复] 使用 enumerate 获取消息索引(msg_index)，用于生成唯一的 key
-for msg_index, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        # 如果是纯文本消息
-        if "content" in msg:
-            st.markdown(msg["content"])
-
-        # 如果是后端返回的 Dashboard 结果
-        if "dashboard" in msg:
-            dashboard = msg["dashboard"]
-            st.subheader(dashboard.get("title", "分析看板"))
-
-            # 获取组件列表
-            components = dashboard.get("components", [])
-
-            # 简单的两列布局
-            col1, col2 = st.columns(2)
-
-            for i, comp in enumerate(components):
-                # 决定放在哪一列
-                # 地图和图表按顺序排列，Insight 通常占满整行
-                if comp["type"] == "insight":
-                    target_col = st.container()
-                else:
-                    target_col = col1 if i % 2 == 0 else col2
-
-                with target_col:
-                    with st.container(border=True):
-                        # 组件标题
-                        # st.markdown(f"**{comp['title']}**")
-
-                        # === 渲染 Plotly 图表/地图 ===
-                        if comp["type"] in ["map", "chart"]:
-                            if comp.get("data_payload"):
-                                try:
-                                    # 将后端返回的 JSON 转换为 Plotly Figure 对象
-                                    fig = go.Figure(comp["data_payload"])
-
-                                    # [关键修复] 指定唯一的 key
-                                    # 格式: chart_消息索引_组件ID
-                                    unique_key = f"chart_{msg_index}_{comp['id']}"
-
-                                    st.plotly_chart(
-                                        fig,
-                                        use_container_width=True,
-                                        key=unique_key
-                                    )
-                                except Exception as e:
-                                    st.error(f"图表渲染失败: {e}")
-                            else:
-                                st.warning("暂无数据载荷")
-
-                        # === 渲染 智能洞察 ===
-                        elif comp["type"] == "insight":
-                            config = comp.get("insight_config", {})
-                            if config:
-                                st.info(f"💡 **核心结论**: {config.get('summary', '')}")
-                                st.markdown(config.get("detail", ""))
-                                tags = config.get("tags", [])
-                                if tags:
-                                    # 以此类推渲染标签
-                                    st.markdown("🏷️ " + "  ".join([f"`{t}`" for t in tags]))
-
-# 2. 处理用户输入
-if prompt := st.chat_input("输入分析指令 (例如: 分析各行政区的订单占比)"):
-    if not st.session_state.uploaded:
-        st.warning("⚠️ 请先在左侧上传数据文件！")
-        st.stop()
-
-    # 添加用户消息到历史
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    # 立即在界面显示用户输入
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # 调用后端 API
-    with st.chat_message("assistant"):
-        with st.spinner("AI 正在思考、生成代码并执行全量数据分析..."):
-            try:
+    # 2. 历史回溯区 (实现原型图左侧回溯)
+    st.markdown("---")
+    st.subheader("📜 历史分析快照")
+    if not st.session_state.history:
+        st.info("暂无历史记录")
+    else:
+        # 按时间倒序排列
+        for item in reversed(st.session_state.history):
+            # 点击历史条目进行“回溯”
+            btn_label = f"🕒 {item['time']}\n{item['summary']}"
+            if st.button(btn_label, key=item['snapshot_id'], use_container_width=True):
                 payload = {
                     "session_id": st.session_state.session_id,
-                    "query": prompt,
-                    "bbox": [],
-                    "selected_ids": [],
-                    "force_new": False
+                    "trigger_type": "backtrack",
+                    "target_snapshot_id": item['snapshot_id']
                 }
+                call_interact(payload)
 
-                # 发送 POST 请求
-                resp = requests.post(f"{API_BASE_URL}/chat/interact", json=payload)
+# --- 主界面布局 (左中右+下结构) ---
 
-                if resp.status_code == 200:
-                    dashboard_data = resp.json()
+# 定义栅格：主展示区(占8/12) : 侧边统计区(占4/12)
+col_main, col_right = st.columns([2, 1])
 
-                    # 保存到历史状态
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "dashboard": dashboard_data
-                    })
+if st.session_state.current_dashboard:
+    db = st.session_state.current_dashboard
+    components = db.get("components", [])
 
-                    # 强制刷新页面以渲染新内容
-                    st.rerun()
+    # 按布局区域(Zone)对组件进行分组
+    center_maps = [c for c in components if c['layout']['zone'] == "center_main"]
+    right_sidebar_items = [c for c in components if c['layout']['zone'] == "right_sidebar"]
+    bottom_insights = [c for c in components if c['layout']['zone'] == "bottom_insight"]
 
-                else:
-                    st.error(f"分析失败 (HTTP {resp.status_code}): {resp.text}")
-            except Exception as e:
-                st.error(f"请求异常: {e}")
+    # 1. 中间主区域：通常是大地图
+    with col_main:
+        for comp in center_maps:
+            st.subheader(f"📍 {comp['title']}")
+            render_visual_component(comp, height=600)
+
+            # 模拟地图框选交互 (联动触发源)
+            c1, c2 = st.columns(2)
+            if c1.button("🔍 模拟框选该区域 (纽约 BBox)", key=f"bbox_{comp['id']}"):
+                payload = {
+                    "session_id": st.session_state.session_id,
+                    "trigger_type": "ui",
+                    "active_component_id": comp['id'],
+                    # 纽约坐标范围: [min_lon, min_lat, max_lon, max_lat]
+                    "bbox": [-74.02, 40.69, -73.85, 40.82],
+                }
+                call_interact(payload)
+
+    # 2. 右侧边栏：统计图表或明细表
+    with col_right:
+        st.markdown("### 📊 维度统计")
+        for comp in right_sidebar_items:
+            with st.container(border=True):
+                st.write(f"**{comp['title']}**")
+                render_visual_component(comp, height=350)
+
+                # 联动模拟：点选特定 ID
+                if st.button(f"🔗 选中实体下钻", key=f"link_{comp['id']}"):
+                    payload = {
+                        "session_id": st.session_state.session_id,
+                        "trigger_type": "ui",
+                        "active_component_id": comp['id'],
+                        "selected_ids": ["sample_id_001"]  # 模拟点击选中
+                    }
+                    call_interact(payload)
+
+    # 3. 下方全宽区域：AI 智能洞察结果
+    st.markdown("---")
+    for comp in bottom_insights:
+        st.markdown(f"### 💡 {comp['title']}")
+        config = comp.get("insight_config", {})
+        if config:
+            # 渲染 InsightCard 模型数据
+            st.info(config.get("summary", "无摘要结论"))
+            st.markdown(config.get("detail", "暂无深度分析内容"))
+            tags = config.get("tags", [])
+            if tags:
+                # 使用 Streamlit 蓝字标记标签
+                st.markdown(" ".join([f"[:blue[{t}]]" for t in tags]))
+        else:
+            # 如果是普通的 Data Payload
+            render_visual_component(comp, height=200)
+
+else:
+    # 初始状态提示
+    st.info("👋 准备就绪！请在左侧上传数据文件，然后在下方输入您的分析问题。")
+
+# --- 底部固定对话框 (NL 输入) ---
+# 使用 HTML 增加一点间隔
+st.markdown("<br><br>", unsafe_allow_html=True)
+if prompt := st.chat_input("输入分析指令 (例如: 分析曼哈顿地区的订单分布)"):
+    if not st.session_state.uploaded:
+        st.warning("⚠️ 请先在左侧上传并初始化数据集。")
+    else:
+        payload = {
+            "session_id": st.session_state.session_id,
+            "trigger_type": "nl",
+            "query": prompt,
+            "force_new": False
+        }
+        call_interact(payload)
