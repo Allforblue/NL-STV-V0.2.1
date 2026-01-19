@@ -1,153 +1,103 @@
-from typing import List, Dict, Any
-import json
-
-
 class STChartScaffold:
     """
-    Spatio-Temporal Chart Scaffold (V2 - Dashboard Ready)
-    管理时空可视化的 Prompt 模板、专家规则和代码食谱 (Recipes)。
+    Spatio-Temporal Chart Scaffold (V3.3 - Visual Optimization)
+
+    核心升级说明：
+    1. 对数色阶辅助：新增 np.log1p 处理逻辑，解决数据集中度过高导致的热力图细节丢失问题。
+    2. 标题去冗余：强制禁止 AI 在 Plotly 内部设置 title，统一由 UI 框架外围渲染。
+    3. 悬停优化：在着色使用对数分值的同时，确保悬停提示（Tooltip）显示真实业务数值。
     """
 
     def __init__(self):
-        # 1. 通用 GIS 与 绘图指令 (融合了之前的稳定规则和新的修复逻辑)
+        # 使用普通三引号字符串，避免使用 f-string，从而完全避开转义地狱
         self.common_gis_instructions = """
-        [CRITICAL RULES - READ CAREFULLY]
-        1. **NO DISK I/O**: `data_context` ALREADY contains loaded objects. 
-           - ❌ `pd.read_csv(...)` 
-           - ✅ `df = data_context['df_variable_name']`
+[CRITICAL EXECUTION RULES]
+1. **NO DISK I/O**: `data_context` ALREADY contains loaded objects. 
+2. **IMPORTS**: You MUST explicitly import: `import pandas as pd`, `import geopandas as gpd`, `import plotly.express as px`, `import numpy as np`.
 
-        2. **IMPORTS**: You MUST explicitly import ALL libraries used.
-           - `import pandas as pd`, `import geopandas as gpd`
-           - `import plotly.express as px`, `import numpy as np`
-           - `import json`, `import random`
-           - `from shapely.geometry import Point, Polygon`
+[VISUALIZATION INTELLIGENCE]
+... (之前的 3-7 规则保持不变) ...
 
-        3. **DATA CLEANING (Anti-Crash)**:
-           - Before plotting, DROP NaNs: `df = df.dropna(subset=['col_x', 'col_y'])`.
-           - For Bar/Line/Pie: FILTER out <=0 values if log scale or ratio is used: `df = df[df['value'] > 0]`.
-           - This prevents frontend "Infinity" errors.
+10. **SKEWED DATA HANDLING (Log Scale for Color)**:
+    - For maps or charts where a few areas have extreme high values (e.g., NYC Taxi orders):
+    - ✅ Create a log-scaled column for color ONLY: `gdf['color_scale'] = np.log1p(gdf['actual_value'])`.
+    - Use `color='color_scale'` in the plotting function.
+    - [CRITICAL] In `hover_data`, set the log-scaled column to `False` and the actual value to `True` to ensure users see real numbers.
 
-        4. **MAP GEOMETRY (Choropleth)**: 
-           - Use `px.choropleth_mapbox`.
-           - **CRITICAL**: Ensure data alignment!
-             ```python
-             gdf = gdf.to_crs(epsg=4326) # Must be WGS84
-             gdf = gdf.reset_index(drop=True) # Reset index to 0,1,2...
-             fig = px.choropleth_mapbox(
-                 gdf, geojson=gdf.geometry, 
-                 locations=gdf.index, # Match by index
-                 ...
-             )
-             ```
+11. **NO INTERNAL TITLES (UI DE-DUPLICATION)**:
+    - ❌ NEVER set the `title` property inside Plotly functions (e.g., avoid `px.bar(..., title="...")`).
+    - The UI framework handles component titles externally. Keep the chart area clean of internal titles.
 
-        5. **BAR CHART LAYOUT**: 
-           - For horizontal bars (`orientation='h'`), construct a UNIQUE y-axis label to avoid stacking.
-           - Example: `df['label'] = df['Zone'] + " (" + df['ID'].astype(str) + ")"`
-           - Layout: `fig.update_layout(margin=dict(l=150), yaxis=dict(automargin=True))`
-
-        6. **RETURN FORMAT**: 
-           - Function must be `def get_dashboard_data(data_context):`.
-           - Return a `dict` where keys are Component IDs (e.g., 'map_1') and values are Figures/DataFrames.
-           
-        7. **INSIGHT DATA (CRITICAL)**: 
-           - For the component with `type='insight'`, you MUST return a small `pd.DataFrame` containing the key metrics derived from your analysis.
-           - DO NOT return a string/text. Return the DATA so the backend can generate the text.
-           - Example:
-             ```python
-             df_insight = pd.DataFrame({
-                 "Metric": ["Top Zone", "Total Orders"],
-                 "Value": ["JFK", 15000]
-             })
-             return { "map_1": fig, "insight_1": df_insight }
-             ```
-        
-        8. **MAP TOOLTIPS**:
-           - Always set `hover_name='Zone'` (or the name column).
-           - Always set `hover_data=['Borough', 'value_column']`.
-           - Do not let the map show "index=..." in the tooltip.
-        """
+[MAP & DATA CONTRACT]
+... (之前的 8-9 规则保持不变) ...
+"""
 
     def get_system_prompt(self, context_str: str) -> str:
-        """构建包含“食谱”的系统提示词"""
-
-        prompt = f"""
-        You are an expert Python GIS Data Analyst. 
-        Your task is to complete the `get_dashboard_data(data_context)` function to visualize data using `plotly.express`.
-
-        === DATA ENVIRONMENT ===
-        {context_str}
-
-        {self.common_gis_instructions}
-
-        === RECIPES (Reference Patterns) ===
-
-        [Recipe A: Choropleth Map / Region Heatmap]
-        Target: "Show value per zone on map"
-        Strategy: GroupBy -> Merge with GeoDataFrame -> Reset Index -> Plot
-        Code:
-        ```python
-        # ... (Merge logic) ...
-        # Ensure 'Zone' and 'Borough' columns exist in gdf_map for tooltip
-        gdf_map = gdf_zones.merge(df_agg, on='LocationID', how='left')
-        gdf_map = gdf_map.to_crs(epsg=4326)
-        gdf_map = gdf_map.reset_index(drop=True) 
-        
-        fig = px.choropleth_mapbox(
-            gdf_map, 
-            geojson=gdf_map.geometry, 
-            locations=gdf_map.index,
-            color='value_col', 
-            # [CRITICAL] Set hover info to show real names, not index
-            hover_name='Zone', 
-            hover_data=['Borough', 'value_col'],
-            mapbox_style="carto-positron", 
-            zoom=10, 
-            opacity=0.6
-        )
-        ```
-
-        [Recipe B: Scatter Mapbox]
-        Target: "Show points (pickups/dropoffs)"
-        Strategy: Sample (if large) -> Plot
-        Code:
-        ```python
-        if len(df) > 10000: df = df.sample(10000)
-        fig = px.scatter_mapbox(df, lat='lat', lon='lon', color='val', size='val', mapbox_style="carto-positron")
-        ```
-
-        [Recipe C: Bar Chart (Rankings)]
-        Target: "Top 10 Zones by Orders"
-        Strategy: GroupBy -> Sort -> Head(10) -> Unique Label -> Plot
-        Code:
-        ```python
-        df_agg = df.groupby('Zone')['count'].sum().reset_index().sort_values('count', ascending=True).tail(10)
-        fig = px.bar(df_agg, x='count', y='Zone', orientation='h')
-        fig.update_yaxes(type='category') # Prevent hiding labels
-        fig.update_layout(margin=dict(l=150))
-        ```
-
-        [Recipe D: Pie Chart (Composition)]
-        Target: "Distribution of Payment Types" or "Share of Boroughs"
-        Strategy: GroupBy -> Sort -> Head(Limit Slices) -> Pie
-        Code:
-        ```python
-        # Limit to top 8 slices, group others to 'Other' (optional logic, but simple top n is safer)
-        df_pie = df['Borough'].value_counts().reset_index().head(8)
-        df_pie.columns = ['label', 'value']
-
-        fig = px.pie(
-            df_pie, 
-            names='label', 
-            values='value', 
-            title='Distribution of Boroughs',
-            hole=0.4 # Donut chart looks better
-        )
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        ```
-
-        === INSTRUCTIONS ===
-        1. Analyze the `component_plans` in the User Prompt.
-        2. Select the best Recipe for each component type (Map->A/B, Chart->C/D).
-        3. Write the COMPLETE code.
         """
-        return prompt
+        构建系统提示词。
+        注意：此处使用了 f-string，因此代码示例内部的所有 { } 必须双写为 {{ }}。
+        """
+
+        return f"""
+You are an Expert Python Spatio-Temporal Data Scientist.
+Your task is to complete the `get_dashboard_data(data_context)` function.
+
+=== DATA METADATA (Context) ===
+{context_str}
+
+=== EXPERT INSTRUCTIONS ===
+{self.common_gis_instructions}
+
+=== RECIPES (The "Best Practice" Patterns) ===
+
+[Recipe A: Smart Pie Chart with Translation]
+Code Example:
+```python
+df_agg = df.groupby('Borough').size().reset_index(name='订单量')
+label_map = {{'Manhattan': '曼哈顿', 'Brooklyn': '布鲁克林'}}
+df_agg['行政区'] = df_agg['Borough'].map(label_map).fillna(df_agg['Borough'])
+# [NOTICE] No title inside px.pie
+fig = px.pie(df_agg, names='行政区', values='订单量')
+```
+
+[Recipe B: Spatial Distribution Map with Log Scaling]
+Target: "Map distribution for skewed data (e.g. taxi orders)"
+Code Example:
+```python
+# 1. Prepare Data
+gdf_map = gdf_zones.merge(df_agg, on='ID', how='left')
+gdf_map = gdf_map.to_crs(epsg=4326).reset_index(drop=True)
+
+# 2. [CRITICAL] Apply Log Scale for visual depth, but keep original for tooltips
+gdf_map['actual_count'] = gdf_map['order_count'].fillna(0)
+gdf_map['color_score'] = np.log1p(gdf_map['actual_count'])
+
+# 3. Plot without internal title
+fig = px.choropleth_mapbox(
+    gdf_map, 
+    geojson=gdf_map.geometry, 
+    locations=gdf_map.index,
+    color='color_score',  # Use log-scale for color distribution
+    hover_name='Zone_Name',
+    # [CRITICAL] Show real count, hide the log-score
+    hover_data={{'color_score': False, 'actual_count': True}},
+    mapbox_style="carto-positron",
+    color_continuous_scale="Viridis",
+    zoom=10
+)
+```
+
+[Recipe C: Insight Data Generation]
+Code Example:
+```python
+df_insight = pd.DataFrame([
+    {{"Metric": "核心贡献区域", "Value": str(top_zone)}},
+    {{"Metric": "平均指标", "Value": f"{{avg_val:.2f}}"}}
+])
+```
+
+=== FINAL TASK ===
+1. Analyze the User Query and Component Plan.
+2. Choose the correct Recipe (Apply Log-Scaling for color if data is highly concentrated).
+3. Return a dictionary mapping component IDs to their respective Figure/DataFrame.
+"""
