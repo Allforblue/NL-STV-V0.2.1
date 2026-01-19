@@ -39,9 +39,6 @@ async def lifespan(app: FastAPI):
 
     # 2. 初始化核心工作流
     try:
-        # 获取环境变量中的 Key (建议正式开发使用环境变量)
-        # api_key = os.getenv("DEEPSEEK_API_KEY", "sk-60160407beb64fb989638a7e1aaadf12")  # 也可以保持你之前的硬编码测试
-
         # 初始化 LLM 客户端
         client = AIClient(model_name="deepseek-chat")
 
