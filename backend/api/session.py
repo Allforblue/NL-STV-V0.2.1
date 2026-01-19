@@ -1,5 +1,4 @@
-from fastapi import APIRouter
-# [修改] 导入单例对象
+from fastapi import APIRouter, HTTPException
 from core.services.session_service import session_service
 
 router = APIRouter()
@@ -7,35 +6,38 @@ router = APIRouter()
 
 @router.get("/{session_id}/status")
 async def get_session_status(session_id: str):
-    """检查当前会话加载了哪些数据"""
-    # [修改] 使用实例调用
+    """获取会话实时状态"""
     state = session_service.get_session(session_id)
-
     if not state:
-        return {"active": False, "message": "Session not found"}
+        return {"active": False}
 
-    # 提取文件名列表 (做一些防御性处理)
-    file_names = []
-    if "summaries" in state:
-        for s in state["summaries"]:
-            # 优先获取 filename，如果没有则尝试从 path 解析，最后用 variable_name 兜底
-            info = s.get("file_info", {})
-            name = info.get("name") or info.get("path") or s.get("variable_name", "unknown")
-            file_names.append(name)
-
+    store = state.get("state_store")
     return {
         "active": True,
         "session_id": session_id,
-        "data_files": file_names,
-        # 检查是否有历史 Workflow 状态，如果有说明已经进行过分析
-        "has_history": state.get("last_workflow_state") is not None,
-        "variable_count": len(state.get("data_context", {}))
+        "is_full_data": state.get("is_full_data", False),
+        "snapshot_count": len(store.snapshots) if store else 0,
+        "current_snapshot_id": store.current_snapshot_id if store else None
+    }
+
+
+@router.get("/{session_id}/history")
+async def get_session_history(session_id: str):
+    """
+    [新增] 获取历史快照列表
+    用于驱动原型图左侧的“历史对话区域”
+    """
+    history = session_service.get_history_list(session_id)
+    if not history and not session_service.get_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "session_id": session_id,
+        "history": history  # 包含 snapshot_id, query, time, summary
     }
 
 
 @router.delete("/{session_id}")
 async def clear_session(session_id: str):
-    """清理会话，释放内存中的 DataFrame"""
-    # [修改] 使用实例调用
     session_service.delete_session(session_id)
     return {"status": "cleared", "session_id": session_id}
