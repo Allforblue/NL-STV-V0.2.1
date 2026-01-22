@@ -21,8 +21,6 @@ class LayoutZone(str, Enum):
     LEFT_HISTORY = "left_history"  # 左侧历史记录区 (由系统管理)
 
 
-# 修改 core/schemas/dashboard.py
-
 class ChartType(str, Enum):
     BAR = "bar"
     LINE = "line"
