@@ -11,57 +11,9 @@
 - 前端：React + Vite
 
 #### 项目组织架构
+暂未更新
 ```text
-NL-STV_v2/
-├── backend/                # 后端核心 (FastAPI)
-│   ├── main.py             # 后端入口，配置 FastAPI 路由与中间件
-│   ├── api/                # API 接口层
-│   │   ├── endpoints/
-│   │   │   ├── chat.py     # 处理 AI 对话、指令解析
-│   │   │   ├── data.py     # 处理文件上传、数据预览、元数据获取
-│   │   │   └── session.py  # 管理用户会话状态、上下文清除
-│   │   └── deps.py         # 依赖注入（如 AIClient 实例化）
-│   ├── core/               # 升级后的核心逻辑层 (保留并增强原有模块)
-│   │   ├── ingestion/      # 数据接入 (原有)
-│   │   ├── profiler/       # 数据分析
-│   │   │   ├── semantic_analyzer.py
-│   │   │   └── relation_mapper.py   # [新增] 分析多表之间的关联关系
-│   │   ├── generation/     # 代码与指令生成
-│   │   │   ├── code_generator.py    # 生成绘图/分析逻辑
-│   │   │   ├── viz_editor.py        # 基于上下文的增量修改
-│   │   │   └── dashboard_planner.py # [新增] 规划多维看板布局与组件
-│   │   ├── execution/      # 代码执行与结果捕获
-│   │   │   ├── executor.py
-│   │   │   └── insight_extractor.py # [新增] 提取执行结果特征，生成文字洞察
-│   │   └── llm/            # LLM 客户端
-│   ├── schemas/            # Pydantic 模型 (定义前后端交互的 JSON 格式)
-│   │   ├── dashboard.py    # 看板布局协议 (Map + Charts + Insights)
-│   │   └── interaction.py  # 多模态交互协议 (Text + BBox)
-│   ├── services/           # 业务逻辑编排层 (粘合 core 模块)
-│   │   ├── session_service.py # 维护内存/Redis 中的会话上下文
-│   │   └── workflow.py     # 定义从提问到看板生成的完整流水线
-│   └── data_sandbox/       # 数据沙箱 (存储上传的临时文件)
-├── frontend/               # 前端看板 (React + Vite)
-│   ├── public/
-│   ├── src/
-│   │   ├── components/     # UI 组件
-│   │   │   ├── map/        # Deck.gl / Mapbox 地图组件 (支持框选交互)
-│   │   │   ├── charts/     # ECharts 统计图组件 (支持联动)
-│   │   │   ├── chat/       # AI 聊天交互窗口
-│   │   │   └── dashboard/  # 看板网格容器 (动态布局)
-│   │   ├── store/          # 全局状态管理 (Zustand/Redux) - 管理 BBox, 选中的数据
-│   │   ├── hooks/          # 自定义 Hook (处理地图事件捕捉、API 请求)
-│   │   ├── api/            # Axios 接口封装
-│   │   └── App.tsx         # 页面主入口
-│   ├── package.json
-│   └── vite.config.ts
-├── config/                 # 配置文件
-│   ├── config.yaml         # 系统参数、模型配置
-│   └── prompts/            # 专门存放各类 Agent 的提示词模板
-├── logs/                   # 日志文件
-├── .env                    # 环境变量 (API Keys, DB URLs)
-├── docker-compose.yml      # 一键部署配置 (Backend + Frontend + Redis)
-└── requirements.txt        # 后端依赖
+
 ```
 
 ### 项目任务书
@@ -83,4 +35,12 @@ NL-STV_v2/
 
 5. 原型系统集成与多维度实证评价。
 整合上述研究模块，开发一套完整的一站式时空数据智能可视化原型系统。选取城市交通流分析等典型场景进行实证测试。不仅从技术维度评估系统在指令解析准确率、渲染响应速度等方面的性能，还将通过用户可用性测试，验证大模型驱动模式在降低时空分析门槛、提升非专业用户操作效率方面的实际价值。
+
+### 目前计划：
+1. 增加交互功能
+2. 时间维度分析，折线图，时间相关的聚类标注，最主要，其实想看能不能绘制动态热力图
+3. 可以自己调用一些简单数据分析方法，比如聚类、回归等模型进一步分析数据（这个有一篇chat2Viz的论文似乎可以参考）
+4. 时间相关的话，其实还想做OD流向分析，但是似乎比较难
+5. 结果洞察目前还比较简单，有待进一步提升，进行更详细的分析，这个需要和聚类回归等结果结合最好
+6. 目前项目存在的突出问题是性能较低，主要是AI那边响应比较慢
 
