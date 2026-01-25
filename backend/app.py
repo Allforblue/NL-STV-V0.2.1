@@ -54,8 +54,12 @@ def render_visual_component(comp, height=400):
     try:
         # 1. 尝试作为 Plotly 图表渲染 (处理 Dict 类型的 payload)
         if isinstance(payload, dict) and ("data" in payload or "layout" in payload):
+            # 移除图表对象内部可能存在的标题，实现彻底去冗余
+            if "layout" in payload and "title" in payload["layout"]:
+                payload["layout"]["title"] = None
+
             fig = go.Figure(payload)
-            fig.update_layout(height=height, margin=dict(l=10, r=10, t=40, b=10))
+            fig.update_layout(height=height, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True, key=f"viz_{comp['id']}")
 
         # 2. 尝试作为数据表格渲染 (处理 List 类型的 payload，即 DataFrame records)
@@ -114,11 +118,16 @@ with st.sidebar:
 
 # --- 主界面布局 (左中右+下结构) ---
 
-# 定义栅格：主展示区(占8/12) : 侧边统计区(占4/12)
-col_main, col_right = st.columns([2, 1])
-
 if st.session_state.current_dashboard:
     db = st.session_state.current_dashboard
+
+    # [新增] 显示全局时间范围状态
+    if db.get("global_time_range"):
+        st.info(f"📅 **当前分析时段**: {db['global_time_range'][0]} 至 {db['global_time_range'][1]}")
+
+    # 定义栅格：主展示区(占8/12) : 侧边统计区(占4/12)
+    col_main, col_right = st.columns([2, 1])
+
     components = db.get("components", [])
 
     # 按布局区域(Zone)对组件进行分组
@@ -139,8 +148,19 @@ if st.session_state.current_dashboard:
                     "session_id": st.session_state.session_id,
                     "trigger_type": "ui",
                     "active_component_id": comp['id'],
-                    # 纽约坐标范围: [min_lon, min_lat, max_lon, max_lat]
+                    # 纽约坐标范围
                     "bbox": [-74.02, 40.69, -73.85, 40.82],
+                }
+                call_interact(payload)
+
+            # [新增] 模拟时间维度交互
+            if c2.button("🕒 模拟选择高峰时段 (Time Range)", key=f"time_{comp['id']}"):
+                payload = {
+                    "session_id": st.session_state.session_id,
+                    "trigger_type": "ui",
+                    "active_component_id": comp['id'],
+                    # 模拟 2025年1月1日 早高峰范围
+                    "time_range": ["2025-01-01 07:00:00", "2025-01-01 10:00:00"],
                 }
                 call_interact(payload)
 
@@ -168,15 +188,12 @@ if st.session_state.current_dashboard:
         st.markdown(f"### 💡 {comp['title']}")
         config = comp.get("insight_config", {})
         if config:
-            # 渲染 InsightCard 模型数据
             st.info(config.get("summary", "无摘要结论"))
             st.markdown(config.get("detail", "暂无深度分析内容"))
             tags = config.get("tags", [])
             if tags:
-                # 使用 Streamlit 蓝字标记标签
                 st.markdown(" ".join([f"[:blue[{t}]]" for t in tags]))
         else:
-            # 如果是普通的 Data Payload
             render_visual_component(comp, height=200)
 
 else:
@@ -184,7 +201,6 @@ else:
     st.info("👋 准备就绪！请在左侧上传数据文件，然后在下方输入您的分析问题。")
 
 # --- 底部固定对话框 (NL 输入) ---
-# 使用 HTML 增加一点间隔
 st.markdown("<br><br>", unsafe_allow_html=True)
 if prompt := st.chat_input("输入分析指令 (例如: 分析曼哈顿地区的订单分布)"):
     if not st.session_state.uploaded:
