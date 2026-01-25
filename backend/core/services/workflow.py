@@ -60,11 +60,16 @@ class AnalysisWorkflow:
                 logger.error("快照不存在，降级为普通分析")
 
         # === 1. 数据增强与交互映射 (Profiling) ===
-        # 确保语义标签存在
+        # [关键修改]：检查语义画像是否已存在，避免每轮对话重复分析
         for summary in data_summaries:
-            if not summary.get("semantic_analysis", {}).get("semantic_tags") and "file_info" in summary:
+            sem_analysis = summary.get("semantic_analysis", {})
+            # 如果没有 column_metadata (V3版核心字段)，且有文件路径，则执行分析
+            if not sem_analysis.get("column_metadata") and "file_info" in summary:
+                logger.info(f">>> [Analysis] 正在执行初次语义画像: {summary['variable_name']}")
                 analysis = self.analyzer.analyze(summary["file_info"].get("path"))
                 summary["semantic_analysis"] = analysis.get("semantic_analysis", {})
+            else:
+                logger.info(f">>> [Skip] 变量 {summary['variable_name']} 已有画像，跳过 AI 分析")
 
         # 预识别交互锚点 (为联动提供依据)
         interaction_anchors = self.interaction_mapper.identify_interaction_anchors(data_summaries)
@@ -75,7 +80,7 @@ class AnalysisWorkflow:
             session_state = session_service.get_session(payload.session_id)
             last_state = session_state.get("last_workflow_state") if session_state else None
 
-            # 判断是否为增量修改 (点地图或已有看板)
+            # 判断是否为增量修改 (点地图、拖动时间轴或基于已有看板对话)
             is_edit_mode = (
                     payload.trigger_type == InteractionTriggerType.UI_ACTION or
                     (last_state and last_state.get("last_code") and not payload.force_new)
@@ -116,12 +121,25 @@ class AnalysisWorkflow:
                     component_plans=dashboard_plan.components
                 )
 
+            # 同步交互产生的时间范围到看板协议中，确保 UI 状态一致
+            if payload.time_range:
+                dashboard_plan.global_time_range = payload.time_range
+
             # === 3. 代码执行与自愈 (Executor) ===
+            # [关键修改]：只有在真正运行代码前，才确保加载全量数据，极大提升分析阶段响应速度
+            logger.info(">>> [Full Load] 正在按需准备全量数据上下文...")
+            session_service.ensure_full_data_context(payload.session_id)
+            # 获取最新的上下文（因为 ensure_full_data_context 之后 data_context 会变更为全量）
+            full_session = session_service.get_session(payload.session_id)
+            actual_data_context = full_session["data_context"]
+
             logger.info(">>> 执行看板代码逻辑...")
+            comp_ids = [c.id for c in dashboard_plan.components]
+
             exec_result = self.executor.execute_dashboard_logic(
                 code_str=current_code,
-                data_context=data_context,
-                component_ids=[c.id for c in dashboard_plan.components]
+                data_context=actual_data_context, # 使用全量数据
+                component_ids=comp_ids
             )
 
             if not exec_result.success:
@@ -129,7 +147,7 @@ class AnalysisWorkflow:
                 logger.warning("执行失败，尝试自动修复...")
                 current_code = self.generator.fix_code(current_code, exec_result.error, data_summaries)
                 exec_result = self.executor.execute_dashboard_logic(
-                    current_code, data_context, [c.id for c in dashboard_plan.components]
+                    current_code, actual_data_context, comp_ids
                 )
                 if not exec_result.success: raise Exception(f"代码引擎崩溃: {exec_result.error}")
 
@@ -154,7 +172,7 @@ class AnalysisWorkflow:
             # 将本次结果存入 Session 以便左侧列表回溯
             snapshot_id = session_service.save_snapshot(
                 session_id=payload.session_id,
-                query=payload.query or f"交互: {payload.active_component_id}",
+                query=payload.query or f"交互: {payload.active_component_id or '时间筛选'}",
                 code=current_code,
                 layout_data=dashboard_plan,
                 summary=insight_card.summary

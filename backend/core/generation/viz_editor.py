@@ -51,7 +51,10 @@ class VizEditor:
 3. 空间过滤规则：
    - 如果用户提供 BBox，优先使用 GeoPandas 的 `.cx[lon_min:lon_max, lat_min:lat_max]`。
    - 确保坐标系一致，必要时调用 `df = df.to_crs(epsg=4326)`。
-4. 联动响应规则：
+4. 时间过滤规则：
+   - 如果用户提供 time_range，确保先使用 `pd.to_datetime()` 转换时间列。
+   - 使用布尔索引 `df[(df[col] >= start) & (df[col] <= end)]` 进行窗口切片。
+5. 联动响应规则：
    - 如果是 UI 交互，请识别受影响的组件 ID。
    - 只针对受影响的数据流进行修改，不要破坏其他无关组件。
 """
@@ -77,6 +80,8 @@ class VizEditor:
                 interaction_desc += f"动作：在地图上框选了范围 {payload.bbox}。请对受影响的数据流进行空间过滤(Spatially Filter)。\n"
             if payload.selected_ids:
                 interaction_desc += f"动作：点击选中了 ID 列表 {payload.selected_ids}。请进行属性过滤(Attribute Filter)。\n"
+            if getattr(payload, 'time_range', None):
+                interaction_desc += f"动作：选择了时间范围 {payload.time_range}。请进行时间过滤(Temporal Filter)。\n"
         else:
             interaction_desc += f"自然语言指令: \"{payload.query}\"。请根据指令修改看板内容或分析维度。\n"
 
@@ -95,6 +100,7 @@ class VizEditor:
 请修改原有代码，使看板响应上述交互。
 如果涉及空间过滤，请务必在代码最开始的部分对相关的 GeoDataFrame 应用 `.cx` 过滤。
 如果涉及属性过滤，请使用 `df[df[key].isin(ids)]` 逻辑。
+如果涉及时间过滤，请确保将时间列转换为 datetime 格式后应用范围过滤。
 
 请只输出修改后的完整 Python 代码块。
 """

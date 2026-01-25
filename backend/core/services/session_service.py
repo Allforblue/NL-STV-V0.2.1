@@ -148,8 +148,6 @@ class SessionManager:
             del self._sessions[session_id]
             logger.info(f"🗑️ 会话 {session_id} 已移除。")
 
-    # 修改 core/services/session_service.py
-
     def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]):
         """
         更新会话的最新的执行元数据（如 last_code, last_layout）

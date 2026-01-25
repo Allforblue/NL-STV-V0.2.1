@@ -7,21 +7,22 @@ from core.ingestion.loader_factory import LoaderFactory
 
 logger = logging.getLogger(__name__)
 
+
 class SemanticAnalyzer:
     """
-    语义分析器 (V3 通用元数据版)：
-    1. 自动识别任意数据集的业务概念映射（中英文对齐）。
-    2. 分析维度基数 (Cardinality)，为图表选型提供决策依据。
-    3. 识别跨表关联键，支撑通用的语义钻取。
+    语义分析器 (V4 时空增强版)：
+    1. 自动识别业务概念映射（中英文对齐）。
+    2. [增强] 深度感知时间维度：识别时间范围、粒度和聚合建议。
+    3. 分析维度基数，为时空看板规划提供依据。
     """
 
     def __init__(self, llm_client: AIClient):
         self.llm = llm_client
 
     def _get_basic_fingerprint(self, file_path: str) -> Dict[str, Any]:
-        """获取物理层面的指纹：行数、列名、数据类型、样本"""
+        """获取物理层面的指纹：包含对时间列的初步采样"""
         loader = LoaderFactory.get_loader(file_path)
-        df_preview = loader.peek(file_path, n=5)  # 取样5行
+        df_preview = loader.peek(file_path, n=10)  # 增加到10行，方便 AI 观察时间规律
         row_count = loader.count_rows(file_path)
 
         col_stats = {}
@@ -32,8 +33,8 @@ class SemanticAnalyzer:
                 has_nulls = False
 
             try:
-                # 获取样本值并去重，用于辅助 AI 判断业务含义
-                raw_samples = df_preview[col].dropna().unique()[:3].tolist()
+                # 采样并去重，特别保留可能的时间字符串
+                raw_samples = df_preview[col].dropna().unique()[:5].tolist()
                 samples = [str(x) for x in raw_samples]
             except:
                 samples = []
@@ -51,48 +52,56 @@ class SemanticAnalyzer:
         }
 
     def analyze(self, file_path: str) -> Dict[str, Any]:
-        """主入口：从数据预览中提取通用业务元数据"""
-        logger.info(f"Analyzing universal semantics for: {file_path}")
+        """主入口：从数据中提取“时空双维度”业务元数据"""
+        logger.info(f"Analyzing universal spatio-temporal semantics for: {file_path}")
 
         # 1. 获取物理特征
         fingerprint = self._get_basic_fingerprint(file_path)
 
-        # 2. 构建通用化 System Prompt
+        # 2. 构建包含时间感知逻辑的 System Prompt
         system_prompt = """
-        你是一位全能数据科学家。请对提供的任意数据集样例进行深度语义解析：
+        你是一位资深时空数据专家。请对任意数据集样例进行深度语义解析：
 
-        1. 概念抽象化：不要受行业限制。观察原始列名及样本数据，推断其对应的【通用中文业务概念名称】。
-        2. 字段分类：为每个字段打上语义标签：
-           - ST_TIME: 时间/日期
-           - ST_LAT/ST_LON/ST_GEO: 空间位置
-           - BIZ_METRIC: 数值指标（可聚合，如金额、数量、得分）
-           - BIZ_CAT: 分类维度（不可聚合，如类别、状态、名称）
-           - ID_KEY: 唯一标识或关联外键
-        3. 基数评估：推断该分类字段的【唯一值数量(Cardinality)】。
-           - 若基数较小（<10），该字段非常适合作为饼图或过滤条件。
+        1. 概念抽象化：推断列对应的【通用中文业务概念名称】。
+        2. 【核心】时间维度识别：针对标记为 ST_TIME 的字段，识别：
+           - 精度：数据是秒级、分钟级、小时级还是天级？
+           - 角色：它是下单时间、采集时间还是事件发生时间？
+        3. 【核心】空间维度识别：识别经纬度(ST_LAT/LON)或地理对象(ST_GEO)。
+        4. 字段分类标签：
+           - ST_TIME: 时间戳
+           - ST_LAT/ST_LON/ST_GEO: 地理信息
+           - BIZ_METRIC: 数值指标
+           - BIZ_CAT: 分类维度
+        5. 基数评估：评估唯一值数量，辅助图表选型（<10适合饼图，10-30适合条形图）。
         """
 
-        # 3. 定义严格的通用 JSON 输出结构
+        # 3. 定义包含 temporal_context 的 JSON 输出结构
         user_prompt = f"""
         数据文件: {fingerprint['filename']}
         数据行数: {fingerprint['rows']}
-        字段物理特征: {json.dumps(fingerprint['columns'], ensure_ascii=False)}
+        字段特征预览: {json.dumps(fingerprint['columns'], ensure_ascii=False)}
 
-        请输出 JSON 格式，不要包含任何硬编码的行业假设：
+        请输出 JSON 格式：
         {{
-          "dataset_domain": "识别出的行业领域（如：金融、交通、医疗等）",
-          "description": "对该数据集内容的详细中文描述",
+          "dataset_domain": "识别出的行业领域",
+          "description": "数据集内容详细描述",
           "column_metadata": {{
             "原始列名": {{
-              "concept_name": "对应的中文业务概念名称",
+              "concept_name": "中文概念名",
               "semantic_tag": "上述定义的标签",
-              "cardinality": "估计唯一值数量（如：5, 100, High）",
-              "description": "该字段的业务含义解释",
-              "is_primary_dimension": true/false (是否是分析的核心维度)
+              "cardinality": "唯一值数量预估",
+              "time_granularity": "SECOND | MINUTE | HOUR | DAY | MONTH (仅时间字段)",
+              "is_primary_dimension": true/false
             }}
           }},
-          "recommended_analysis": ["建议的分析方向"],
-          "potential_join_keys": ["可用于关联其他表的字段名"]
+          "temporal_context": {{
+            "primary_time_col": "主时间轴列名",
+            "time_span": "推断的时间范围描述 (如：2025年1月全月)",
+            "suggested_resampling": "建议的聚合频率 (如：'1H', '1D', '1W')",
+            "has_periodic_patterns": true/false (是否有明显的周期性特征)
+          }},
+          "recommended_analysis": ["包含空间和时间维度的分析建议"],
+          "potential_join_keys": ["可用于关联的字段"]
         }}
         """
 
@@ -114,8 +123,14 @@ class SemanticAnalyzer:
                 "semantic_analysis": ai_result,
                 "variable_name": f"df_{Path(file_path).stem.lower().replace('-', '_')}"
             }
+
+            # 日志记录识别到的主时间轴
+            p_time = ai_result.get("temporal_context", {}).get("primary_time_col")
+            if p_time:
+                logger.info(f"✅ 已识别主时间轴字段: {p_time}")
+
             return final_result
 
         except Exception as e:
-            logger.error(f"Universal semantic analysis failed: {e}")
+            logger.error(f"Spatio-temporal analysis failed: {e}")
             return {"error": str(e)}

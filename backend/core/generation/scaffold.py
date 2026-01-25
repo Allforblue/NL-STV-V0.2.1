@@ -1,103 +1,173 @@
+from typing import List, Dict, Any
+import json
+
+
 class STChartScaffold:
     """
-    Spatio-Temporal Chart Scaffold (V3.3 - Visual Optimization)
+    Spatio-Temporal Chart Scaffold (V4.1 - Spatio-Temporal & Theme Integration)
 
-    核心升级说明：
-    1. 对数色阶辅助：新增 np.log1p 处理逻辑，解决数据集中度过高导致的热力图细节丢失问题。
-    2. 标题去冗余：强制禁止 AI 在 Plotly 内部设置 title，统一由 UI 框架外围渲染。
-    3. 悬停优化：在着色使用对数分值的同时，确保悬停提示（Tooltip）显示真实业务数值。
+    整合特性：
+    1. 基础 GIS/绘图防崩溃规则。
+    2. 对数色阶处理 (Log Scale) 优化长尾数据可视化。
+    3. 强制去标题 (No Internal Titles)，实现 UI 统一渲染。
+    4. 时间序列专家准则：支持自动重采样、时段分析与趋势绘图。
+    5. [新增] 全局视觉主题：统一 Plotly 配色方案与模版样式。
     """
 
     def __init__(self):
-        # 使用普通三引号字符串，避免使用 f-string，从而完全避开转义地狱
+        # 通用指令集 (使用普通字符串)
         self.common_gis_instructions = """
-[CRITICAL EXECUTION RULES]
-1. **NO DISK I/O**: `data_context` ALREADY contains loaded objects. 
-2. **IMPORTS**: You MUST explicitly import: `import pandas as pd`, `import geopandas as gpd`, `import plotly.express as px`, `import numpy as np`.
+        [CRITICAL RULES - READ CAREFULLY]
+        1. **NO DISK I/O**: `data_context` ALREADY contains loaded objects. 
+           - ✅ `df = data_context['df_variable_name']`
 
-[VISUALIZATION INTELLIGENCE]
-... (之前的 3-7 规则保持不变) ...
+        2. **IMPORTS**: You MUST explicitly import ALL libraries: `import pandas as pd`, `import geopandas as gpd`, `import plotly.express as px`, `import numpy as np`.
 
-10. **SKEWED DATA HANDLING (Log Scale for Color)**:
-    - For maps or charts where a few areas have extreme high values (e.g., NYC Taxi orders):
-    - ✅ Create a log-scaled column for color ONLY: `gdf['color_scale'] = np.log1p(gdf['actual_value'])`.
-    - Use `color='color_scale'` in the plotting function.
-    - [CRITICAL] In `hover_data`, set the log-scaled column to `False` and the actual value to `True` to ensure users see real numbers.
+        3. **DATA CLEANING (Anti-Crash)**:
+           - Before plotting, DROP NaNs: `df = df.dropna(subset=['col_x', 'col_y'])`.
+           - For Bar/Line/Pie: FILTER out <=0 values if log scale or ratio is used.
 
-11. **NO INTERNAL TITLES (UI DE-DUPLICATION)**:
-    - ❌ NEVER set the `title` property inside Plotly functions (e.g., avoid `px.bar(..., title="...")`).
-    - The UI framework handles component titles externally. Keep the chart area clean of internal titles.
+        4. **MAP GEOMETRY (Choropleth)**: 
+           - Use `px.choropleth_mapbox`. Ensure `gdf.to_crs(epsg=4326).reset_index(drop=True)`.
 
-[MAP & DATA CONTRACT]
-... (之前的 8-9 规则保持不变) ...
-"""
+        5. **BAR CHART LAYOUT**: 
+           - For horizontal bars, construct a UNIQUE label to avoid stacking.
+           - Layout: `fig.update_layout(margin=dict(l=150), yaxis=dict(automargin=True))`
+
+        6. **RETURN FORMAT**: 
+           - Function: `def get_dashboard_data(data_context):`.
+           - Return a `dict` where keys are Component IDs and values are Figures/DataFrames.
+
+        7. **INSIGHT DATA**: 
+           - For 'insight' components, return a `pd.DataFrame` with keys like 'Metric' and 'Value'.
+
+        8. **MAP TOOLTIPS**:
+           - Always set `hover_name='Zone'` and `hover_data` to show real info. No "index=..." in tooltips.
+
+        9. **SKEWED DATA HANDLING (Log Scale)**:
+            - For highly concentrated data (e.g. taxi orders), use log scale for color: 
+            - ✅ `gdf['color_scale'] = np.log1p(gdf['val'])`
+            - In `hover_data`, set `{'color_scale': False, 'val': True}`.
+
+        10. **NO INTERNAL TITLES**:
+            - ❌ NEVER set `title=...` inside Plotly functions. UI handles titles externally.
+
+        11. **TIME SERIES HANDLING**:
+            - **Conversion**: Always use `df['time_col'] = pd.to_datetime(df['time_col'])`.
+            - **Aggregation**: Use `df.set_index('time_col').resample(time_bucket).size()` for trends. 
+            - **Filling Gaps**: Use `.fillna(0)` to ensure lines connect properly in charts.
+            - **Cyclic Patterns**: Use `df['time_col'].dt.hour` or `.dt.dayofweek` for periodic analysis.
+
+        12. **VISUAL STYLE & THEME (NEW)**:
+            - **Template**: Always use `template='plotly_white'` for a clean, modern look.
+            - **Continuous Scale**: For maps and heatmaps, use `color_continuous_scale='Viridis'` or `'Plasma'`.
+            - **Discrete Sequence**: For categorical charts (Pie/Bar), use `color_discrete_sequence=px.colors.qualitative.Prism`.
+        """
 
     def get_system_prompt(self, context_str: str) -> str:
         """
         构建系统提示词。
-        注意：此处使用了 f-string，因此代码示例内部的所有 { } 必须双写为 {{ }}。
         """
 
-        return f"""
-You are an Expert Python Spatio-Temporal Data Scientist.
-Your task is to complete the `get_dashboard_data(data_context)` function.
+        prompt = f"""
+        You are an Expert Python Spatio-Temporal Data Scientist.
+        Your task is to complete the `get_dashboard_data(data_context)` function using `plotly.express`.
 
-=== DATA METADATA (Context) ===
-{context_str}
+        === DATA METADATA (Context) ===
+        {context_str}
 
-=== EXPERT INSTRUCTIONS ===
-{self.common_gis_instructions}
+        === EXPERT INSTRUCTIONS ===
+        {self.common_gis_instructions}
 
-=== RECIPES (The "Best Practice" Patterns) ===
+        === RECIPES (The "Best Practice" Patterns) ===
 
-[Recipe A: Smart Pie Chart with Translation]
-Code Example:
-```python
-df_agg = df.groupby('Borough').size().reset_index(name='订单量')
-label_map = {{'Manhattan': '曼哈顿', 'Brooklyn': '布鲁克林'}}
-df_agg['行政区'] = df_agg['Borough'].map(label_map).fillna(df_agg['Borough'])
-# [NOTICE] No title inside px.pie
-fig = px.pie(df_agg, names='行政区', values='订单量')
-```
+        [Recipe A: Choropleth Map with Log Scaling]
+        Target: "Spatial distribution with concentration"
+        Code:
+        ```python
+        gdf_map = gdf_zones.merge(df_agg, on='ID', how='left').to_crs(epsg=4326).reset_index(drop=True)
+        gdf_map['actual_count'] = gdf_map['order_count'].fillna(0)
+        gdf_map['color_score'] = np.log1p(gdf_map['actual_count'])
+        fig = px.choropleth_mapbox(
+            gdf_map, geojson=gdf_map.geometry, locations=gdf_map.index,
+            color='color_score', hover_name='Zone_Name',
+            hover_data={{'color_score': False, 'actual_count': True}},
+            mapbox_style="carto-positron", color_continuous_scale="Viridis", 
+            template="plotly_white", zoom=10
+        )
+        ```
 
-[Recipe B: Spatial Distribution Map with Log Scaling]
-Target: "Map distribution for skewed data (e.g. taxi orders)"
-Code Example:
-```python
-# 1. Prepare Data
-gdf_map = gdf_zones.merge(df_agg, on='ID', how='left')
-gdf_map = gdf_map.to_crs(epsg=4326).reset_index(drop=True)
+        [Recipe B: Scatter Mapbox]
+        Code:
+        ```python
+        if len(df) > 10000: df = df.sample(10000)
+        fig = px.scatter_mapbox(
+            df, lat='lat', lon='lon', color='val', size='val', 
+            color_continuous_scale="Plasma", template="plotly_white",
+            mapbox_style="carto-positron"
+        )
+        ```
 
-# 2. [CRITICAL] Apply Log Scale for visual depth, but keep original for tooltips
-gdf_map['actual_count'] = gdf_map['order_count'].fillna(0)
-gdf_map['color_score'] = np.log1p(gdf_map['actual_count'])
+        [Recipe C: Bar Chart Rankings]
+        Code:
+        ```python
+        df_agg = df.groupby('Category')['val'].sum().reset_index().sort_values('val', ascending=True).tail(10)
+        fig = px.bar(
+            df_agg, x='val', y='Category', orientation='h',
+            color='Category', color_discrete_sequence=px.colors.qualitative.Prism,
+            template="plotly_white"
+        )
+        ```
 
-# 3. Plot without internal title
-fig = px.choropleth_mapbox(
-    gdf_map, 
-    geojson=gdf_map.geometry, 
-    locations=gdf_map.index,
-    color='color_score',  # Use log-scale for color distribution
-    hover_name='Zone_Name',
-    # [CRITICAL] Show real count, hide the log-score
-    hover_data={{'color_score': False, 'actual_count': True}},
-    mapbox_style="carto-positron",
-    color_continuous_scale="Viridis",
-    zoom=10
-)
-```
+        [Recipe D: Smart Pie Chart]
+        Code:
+        ```python
+        df_pie = df['Borough'].value_counts().reset_index().head(8)
+        fig = px.pie(
+            df_pie, names='index', values='Borough', hole=0.4,
+            color_discrete_sequence=px.colors.qualitative.Prism,
+            template="plotly_white"
+        )
+        ```
 
-[Recipe C: Insight Data Generation]
-Code Example:
-```python
-df_insight = pd.DataFrame([
-    {{"Metric": "核心贡献区域", "Value": str(top_zone)}},
-    {{"Metric": "平均指标", "Value": f"{{avg_val:.2f}}"}}
-])
-```
+        [Recipe E: Time-Series Trend Line Chart]
+        Target: "Analyze trends over time (趋势分析)"
+        Strategy: Convert -> Resample (using time_bucket) -> Fillna -> Plot
+        Code:
+        ```python
+        # Ensure datetime
+        df['time'] = pd.to_datetime(df['pickup_datetime'])
+        # Resample based on time_bucket (e.g., '1H', '1D') from planner
+        bucket = component_plan.get('chart_config', {{}}).get('time_bucket', '1H')
+        df_trend = df.set_index('time').resample(bucket).size().reset_index(name='count')
+        df_trend = df_trend.fillna(0)
 
-=== FINAL TASK ===
-1. Analyze the User Query and Component Plan.
-2. Choose the correct Recipe (Apply Log-Scaling for color if data is highly concentrated).
-3. Return a dictionary mapping component IDs to their respective Figure/DataFrame.
-"""
+        fig = px.line(
+            df_trend, x='time', y='count', 
+            labels={{'count': '数量', 'time': '时间'}},
+            template="plotly_white"
+        )
+        fig.update_traces(mode='lines+markers', line=dict(width=3))
+        ```
+
+        [Recipe F: Periodicity Analysis (Hour/Day Heatmap)]
+        Target: "Peak hour patterns"
+        Code:
+        ```python
+        df['hour'] = pd.to_datetime(df['time']).dt.hour
+        df_hour = df.groupby('hour').size().reset_index(name='count')
+        fig = px.bar(
+            df_hour, x='hour', y='count', 
+            template="plotly_white",
+            color_discrete_sequence=['#636EFA']
+        ) 
+        ```
+
+        === FINAL TASK ===
+        1. Analyze User Query and components.
+        2. Choose Recipe (Use Recipe E for time trends; Use Log-Scaling for skewed spatial data).
+        3. STRICTLY NO internal `title=...`.
+        4. Apply the defined Theme (`plotly_white`) and Color Scales to all charts.
+        5. Return `{{ 'comp_id': fig/df, ... }}`.
+        """
+        return prompt

@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 class DashboardPlanner:
     """
-    看板编排器 (V3.1 鲁棒增强版)：
-    1. 应用方案 B：强化 Prompt 约束，强制 LLM 提供 title。
-    2. 应用方案 C：后端自动补全缺失字段，确保校验 100% 通过。
-    3. 动态感知数据基数，智能选型。
+    看板编排器 (V4.0 时空增强版)：
+    1. 动态感知数据基数与【时间跨度/粒度】，自动匹配最优图表选型（折线图、趋势图）。
+    2. 强制规划全局时间轴与组件重采样粒度 (time_bucket)。
+    3. 保持 V3.1 的鲁棒补全方案。
     """
 
     def __init__(self, llm_client: AIClient):
@@ -33,68 +33,83 @@ class DashboardPlanner:
         return data
 
     def _build_system_prompt(self, summaries: List[Dict[str, Any]]) -> str:
-        # 提取动态元数据上下文
+        # 提取动态元数据上下文 (包含时间维度)
         context_str = ""
         for s in summaries:
             var_name = s.get('variable_name')
-            col_meta = s.get('semantic_analysis', {}).get('column_metadata', {})
+            sem_analysis = s.get('semantic_analysis', {})
+            col_meta = sem_analysis.get('column_metadata', {})
+            temp_context = sem_analysis.get('temporal_context', {})
 
             context_str += f"\n### 数据集变量: {var_name}\n"
+            # 注入时间上下文
+            if temp_context:
+                context_str += (
+                    f"- 时间维度: 主轴 `{temp_context.get('primary_time_col')}` | "
+                    f"跨度: {temp_context.get('time_span')} | "
+                    f"建议聚合频率: `{temp_context.get('suggested_resampling')}`\n"
+                )
+
             for col_raw, meta in col_meta.items():
                 context_str += (
                     f"- 原始列名: `{col_raw}` | 中文概念: '{meta.get('concept_name')}' | "
-                    f"基数(唯一值数量): {meta.get('cardinality')} | 标签: {meta.get('semantic_tag')}\n"
+                    f"基数: {meta.get('cardinality')} | 标签: {meta.get('semantic_tag')}\n"
                 )
 
         layout_rules = LayoutTemplates.get_template_prompt()
 
         prompt = f"""
-        你是一位顶尖的智能数据分析师和可视化专家。请规划一个专业的分析看板。
+        你是一位顶尖的智能数据分析师和时空可视化专家。请规划一个专业的分析看板。
 
         === 数据元数据 (Metadata Context) ===
         {context_str}
 
         {layout_rules}
 
-        === 强制输出约束 (Option B) ===
+        === 强制输出约束 ===
         每个组件(Component)必须严格包含以下字段，严禁缺失：
-        1. "id": 唯一ID
-        2. "title": 组件的中文标题 (必须提供，严禁缺失！！)
-        3. "type": 组件类型
-        4. "layout": {{"zone": "..."}}
-        5. 如果是 "insight" 类型，必须提供 "insight_config": {{"summary": "...", "detail": "...", "tags": []}}
+        1. "id", "title", "type", "layout"
+        2. 如果是 "insight" 类型，必须提供完整的 "insight_config"。
 
-        === 图表选型准则 ===
-        - 基数 < 10 (占比类): 必须用 'pie'。
-        - 基数 10-30: 使用 'bar'。
-        - 基数 > 30: 使用 'table'。
+        === 图表选型与时间分析准则 ===
+        1. 趋势分析优先：若用户询问“趋势”、“变化”、“什么时候”或涉及时间，必须优先使用 'line' (折线图)。
+        2. 聚合粒度：在 line/bar 的 chart_config 中必须指定 'time_bucket' (如 '1H', '1D')。
+        3. 选型逻辑：
+           - 时间趋势 -> 'line'
+           - 低基数占比 -> 'pie'
+           - 高基数排名 -> 'bar'
+           - 周期性规律 -> 'timeline_heatmap'
 
         === 输出格式 (严格 JSON) ===
         {{
-            "dashboard_id": "dash_v3_auto",
+            "dashboard_id": "dash_v4_st",
             "title": "中文看板标题",
             "initial_view_state": {{ "longitude": -74.0, "latitude": 40.7, "zoom": 10 }},
+            "global_time_range": ["YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss"],
             "components": [
                 {{
                     "id": "main_map",
                     "type": "map",
-                    "title": "地理分布图",
                     "layout": {{ "zone": "center_main" }},
                     "map_config": [ {{ "layer_id": "L1", "layer_type": "ScatterplotLayer", "data_api": "N/A" }} ]
                 }},
                 {{
-                    "id": "side_chart_1",
+                    "id": "trend_chart",
                     "type": "chart",
-                    "title": "占比统计",
+                    "title": "时间趋势分析",
                     "layout": {{ "zone": "right_sidebar" }},
-                    "chart_config": {{ "chart_type": "pie", "series_name": "指标", "x_axis": "原始列名" }}
+                    "chart_config": {{ 
+                        "chart_type": "line", 
+                        "series_name": "指标", 
+                        "x_axis": "时间列名",
+                        "time_bucket": "1H" 
+                    }}
                 }},
                 {{
                     "id": "global_insight",
                     "type": "insight",
-                    "title": "核心发现",
                     "layout": {{ "zone": "bottom_insight" }},
-                    "insight_config": {{ "summary": "结论摘要", "detail": "深度解析", "tags": ["标签"] }}
+                    "insight_config": {{ "summary": "...", "detail": "...", "tags": [] }}
                 }}
             ]
         }}
@@ -109,11 +124,12 @@ class DashboardPlanner:
         用户查询指令: "{query}"
 
         任务要求：
-        1. 必须根据数据元数据，从饼图、条形图、表格中选择【最适合基数特征】的两种不同图表放在右侧。
-        2. 严禁漏掉任何组件的 "title" 字段。
+        1. 识别时间意图：如果涉及趋势变化，必须在右侧 RIGHT_SIDEBAR 规划一个折线图。
+        2. 指定全局时间：根据元数据中的 time_span，在根级别设定合理的 global_time_range。
+        3. 必须在所有组件中提供完整的 "title" 字段。
         """
 
-        logger.info(f">>> [Planner] 正在规划看板...")
+        logger.info(f">>> [Planner] 正在规划时空看板...")
 
         try:
             raw_plan = self.llm.query_json(prompt=user_prompt, system_prompt=system_prompt)
@@ -122,25 +138,13 @@ class DashboardPlanner:
             # --- [Option C] 鲁棒性后处理：自动补全缺失字段 ---
             if "components" in clean_plan:
                 for i, comp in enumerate(clean_plan["components"]):
-                    # 1. 补全缺失的标题
                     if not comp.get("title"):
                         comp["title"] = f"分析详情 {i + 1}"
-
-                    # 2. 补全缺失的 ID
                     if not comp.get("id"):
                         comp["id"] = f"comp_{i}"
-
-                    # 3. 修复 insight_config 的内部结构
                     if comp.get("type") == "insight":
                         if "insight_config" not in comp or not isinstance(comp["insight_config"], dict):
-                            comp["insight_config"] = {"summary": "正在分析数据...", "detail": "请稍候查看详细洞察。",
-                                                      "tags": []}
-                        else:
-                            # 补全 insight 内部必填项
-                            cfg = comp["insight_config"]
-                            if "summary" not in cfg: cfg["summary"] = "核心结论生成中"
-                            if "detail" not in cfg: cfg["detail"] = "详细数据特征已提取"
-                            if "tags" not in cfg: cfg["tags"] = ["自动分析"]
+                            comp["insight_config"] = {"summary": "正在生成结论...", "detail": "请稍候。", "tags": []}
 
             # 实例化校验
             dashboard_plan = DashboardSchema(**clean_plan)
@@ -165,7 +169,7 @@ class DashboardPlanner:
                     layout=LayoutConfig(zone=LayoutZone.CENTER_MAIN)
                 ),
                 DashboardComponent(
-                    id="chart_default", title="关键维度统计", type=ComponentType.CHART,
+                    id="chart_default", title="核心维度统计", type=ComponentType.CHART,
                     layout=LayoutConfig(zone=LayoutZone.RIGHT_SIDEBAR),
                     chart_config={"chart_type": ChartType.BAR, "series_name": "记录数", "x_axis": "auto"}
                 ),
@@ -174,7 +178,7 @@ class DashboardPlanner:
                     layout=LayoutConfig(zone=LayoutZone.BOTTOM_INSIGHT),
                     insight_config={
                         "summary": "分析引擎已生成基础结论",
-                        "detail": "虽然复杂规划遇到阻碍，但我们已提取出关键的数据分布特征供您参考。",
+                        "detail": "已提取出关键的数据分布特征供您参考。",
                         "tags": ["Fallback", "Ready"]
                     }
                 )

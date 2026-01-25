@@ -56,17 +56,20 @@ class CodeExecutor:
 
     def _make_serializable(self, obj: Any) -> Any:
         """
-        [新增] 递归将 Numpy 类型转换为 Python 原生类型，防止 FastAPI 序列化报错
+        [增强] 递归将 Numpy/Pandas 类型转换为 Python 原生类型，防止序列化报错
         """
+        # 1. 处理 Numpy 基础类型
         if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
             return int(obj)
         elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
-            # 处理 NaN 和 Inf，JSON 不支持
-            if np.isnan(obj) or np.isinf(obj):
-                return None
+            if np.isnan(obj) or np.isinf(obj): return None
             return float(obj)
-        elif isinstance(obj, (np.bool_, bool)):  # 覆盖 numpy bool
+        elif isinstance(obj, (np.bool_, bool)):
             return bool(obj)
+        # 2. [新增] 处理 Pandas 时间戳
+        elif isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        # 3. 处理集合/数组
         elif isinstance(obj, np.ndarray):
             return self._make_serializable(obj.tolist())
         elif isinstance(obj, dict):
@@ -83,12 +86,11 @@ class CodeExecutor:
             component_ids: List[str]
     ) -> DashboardExecutionResult:
         """
-        执行看板逻辑并捕获多个组件结果
+        执行看板逻辑并捕获多个组件结果，增加时间特征自动捕捉逻辑
         """
         clean_code = self._dedent_code(code_str)
         local_scope = {}
 
-        # 准备执行输出重定向
         old_stdout = sys.stdout
         redirected_output = io.StringIO()
         sys.stdout = redirected_output
@@ -96,58 +98,70 @@ class CodeExecutor:
         try:
             logger.info("Executing dashboard logic...")
 
-            # 1. 执行代码定义
             exec(clean_code, self.global_context, local_scope)
 
             if "get_dashboard_data" not in local_scope:
                 raise ValueError("Generated code must contain 'get_dashboard_data(data_context)' function.")
 
-            # 2. 调用逻辑函数
             all_results = local_scope["get_dashboard_data"](data_context)
 
-            # 3. 结果解析
             final_results = {}
             insight_payload = {}
 
             for cid in component_ids:
                 if cid in all_results:
                     res_obj = all_results[cid]
-                    summary = None
+                    summary = {}
 
                     try:
-                        # 3.1 DataFrame 特征提取
-                        if hasattr(res_obj, 'to_dict'):  # 兼容 DataFrame 和 Series
-                            try:
-                                # 如果数据量很小（比如 < 100 行），直接全量提取！
-                                # 这对于 Insight 非常关键
-                                if len(res_obj) < 100:
-                                    summary = res_obj.to_dict()
-                                else:
-                                    # 数据量大才做 describe
-                                    desc = res_obj.describe(include='all').to_dict()
-                                    summary = {k: v for k, v in desc.items() if isinstance(v, dict)}
-                            except:
-                                pass
+                        # 3.1 DataFrame 特征提取 (增强时间分析)
+                        if hasattr(res_obj, 'to_dict'):
+                            # 基础描述统计
+                            if len(res_obj) < 100:
+                                summary["data_raw"] = res_obj.to_dict()
+                            else:
+                                desc = res_obj.describe(include='all').to_dict()
+                                summary["basic_stats"] = {k: v for k, v in desc.items() if isinstance(v, dict)}
+
+                            # --- [核心新增] 时间序列特征捕捉 ---
+                            # 如果索引或列包含时间属性，提取波峰/波谷/趋势
+                            target_df = res_obj if isinstance(res_obj, pd.DataFrame) else None
+                            if target_df is not None:
+                                time_cols = [c for c in target_df.columns if
+                                             pd.api.types.is_datetime64_any_dtype(target_df[c])]
+                                # 若索引是时间类型（resample 后的常态）
+                                is_time_index = pd.api.types.is_datetime64_any_dtype(target_df.index)
+
+                                if is_time_index or time_cols:
+                                    # 寻找数值列进行趋势分析
+                                    num_cols = target_df.select_dtypes(include=[np.number]).columns
+                                    if not num_cols.empty:
+                                        col = num_cols[0]
+                                        summary["temporal_insights"] = {
+                                            "max_value": target_df[col].max(),
+                                            "peak_time": str(target_df[col].idxmax()) if is_time_index else None,
+                                            "min_value": target_df[col].min(),
+                                            "valley_time": str(target_df[col].idxmin()) if is_time_index else None,
+                                            "overall_growth": float((target_df[col].iloc[-1] - target_df[col].iloc[0]) /
+                                                                    target_df[col].iloc[0]) if len(target_df) > 1 and
+                                                                                               target_df[col].iloc[
+                                                                                                   0] != 0 else 0
+                                        }
 
                         # 3.2 Plotly Figure 特征提取
                         elif hasattr(res_obj, 'data') and len(res_obj.data) > 0:
                             trace = res_obj.data[0]
                             trace_stats = {}
-                            # 尝试提取部分数据预览
                             for key in ['x', 'y', 'lat', 'lon', 'values']:
                                 if hasattr(trace, key) and getattr(trace, key) is not None:
                                     arr = getattr(trace, key)
                                     if hasattr(arr, '__len__'):
-                                        trace_stats[key] = {
-                                            "count": len(arr),
-                                            "sample_len": len(arr)
-                                        }
-                            if trace_stats:
-                                summary = {"figure_preview": trace_stats}
+                                        trace_stats[key] = {"count": len(arr)}
+                            if trace_stats: summary["figure_preview"] = trace_stats
 
                         # 3.3 文本
                         elif isinstance(res_obj, str):
-                            summary = {"text": res_obj[:100]}
+                            summary = {"text": res_obj[:200]}
 
                     except Exception as e:
                         logger.warning(f"Feature extraction warning for {cid}: {e}")
@@ -162,8 +176,6 @@ class CodeExecutor:
                     )
 
             sys.stdout = old_stdout
-
-            # [关键修复] 在返回前清洗所有数据，移除 Numpy 类型
             clean_results = self._make_serializable(final_results)
             clean_insight = self._make_serializable(insight_payload)
 
