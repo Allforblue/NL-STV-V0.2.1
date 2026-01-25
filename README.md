@@ -13,7 +13,55 @@
 #### 项目组织架构
 暂未更新
 ```text
-
+NL-STV-V0.2.1
+├── backend/
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── chat.py
+│   │   ├── data.py
+│   │   └── session.py
+│   └── core/
+│       ├── data_sandbox/
+│       ├── execution/
+│       │   ├── __init__.py
+│       │   ├── executor.py
+│       │   └── insight_extractor.py
+│       ├── generation/
+│       │   ├── __init__.py
+│       │   ├── code_generator.py
+│       │   ├── dashboard_planner.py
+│       │   ├── scaffold.py
+│       │   ├── templates.py
+│       │   └── viz_editor.py
+│       ├── ingestion/
+│       │   ├── __init__.py
+│       │   ├── ingestion.py
+│       │   └── loader_factory.py
+│       ├── llm/
+│       │   ├── __init__.py
+│       │   └── AI_client.py
+│       ├── profiler/
+│       │   ├── __init__.py
+│       │   ├── basic_stats.py
+│       │   ├── interaction_mapper.py
+│       │   ├── relation_mapper.py
+│       │   └── semantic_analyzer.py
+│       ├── schemas/
+│       │   ├── __init__.py
+│       │   ├── dashboard.py
+│       │   ├── interaction.py
+│       │   └── state.py
+│       ├── services/
+│       │   ├── __init__.py
+│       │   ├── session_service.py
+│       │   └── workflow.py
+│       └── __init__.py
+├── data_sandbox/
+├── test/
+├── __init__.py
+├── app.py
+├── main.py
+└── pytest.ini
 ```
 
 ### 项目任务书
