@@ -18,40 +18,43 @@ class LayoutZone(str, Enum):
     CENTER_MAIN = "center_main"  # 中间大地图区域
     RIGHT_SIDEBAR = "right_sidebar"  # 右侧图表区域 (可容纳多个)
     BOTTOM_INSIGHT = "bottom_insight"  # 下方数据洞察结果区域
-    LEFT_HISTORY = "left_history"  # 左侧历史记录区 (由系统管理)
+    LEFT_HISTORY = "left_history"  # 左侧历史记录区
 
 
 class ChartType(str, Enum):
     BAR = "bar"
-    LINE = "line"
+    LINE = "line"            # 常用于时间趋势分析
     SCATTER = "scatter"
     PIE = "pie"
     HEATMAP = "heatmap"
-    TABLE = "table"  # [新增] 允许 LLM 将 table 视为一种图表类型，增加容错性
+    TABLE = "table"
+    # [新增] 时间轴热力图：展示 24小时 x 7天 的分布或随时间演变的强度
+    TIMELINE_HEATMAP = "timeline_heatmap"
 
 
 class InteractionType(str, Enum):
     """交互行为类型"""
-    BBOX = "bbox"  # 空间框选
-    CLICK = "click"  # 实体点击
-    FILTER = "filter"  # 联动过滤
+    BBOX = "bbox"           # 空间框选
+    CLICK = "click"         # 实体点击
+    FILTER = "filter"       # 属性过滤
+    # [新增] 时间范围联动：拖动时间轴或选择时间段
+    TIME_FILTER = "time_filter"
 
 
 # --- 联动逻辑定义 ---
 
 class ComponentLink(BaseModel):
-    """组件间的联动关系：定义该组件的操作会影响哪些其他组件"""
+    """组件间的联动关系定义"""
     target_id: str = Field(..., description="响应联动的目标组件ID")
     interaction_type: InteractionType
-    link_key: str = Field(..., description="关联的字段名，如 'zone_id' 或 'district'")
+    link_key: str = Field(..., description="关联的字段名，如 'zone_id' 或 'timestamp'")
 
 
 # --- 细分配置 ---
 
 class LayoutConfig(BaseModel):
-    """看板布局配置：结合固定区域与栅格坐标"""
+    """看板布局配置：支持浮点数以实现精确对齐"""
     zone: LayoutZone = Field(..., description="所属布局区域")
-    # 将 int 改为 float
     x: float = 0
     y: float = 0
     w: float = 12
@@ -75,6 +78,9 @@ class ChartConfig(BaseModel):
     series_name: str
     unit: Optional[str] = None
     stack: bool = False
+    # [新增] 时间聚合粒度提示：如 '1H' (小时), '1D' (天), '15T' (15分钟)
+    # 这将指引 CodeGenerator 生成对应的 df.resample() 代码
+    time_bucket: Optional[str] = None
 
 
 class InsightCard(BaseModel):
@@ -87,7 +93,7 @@ class InsightCard(BaseModel):
 
 class DashboardComponent(BaseModel):
     id: str = Field(..., description="组件唯一ID")
-    title: str = "分析组件"  # 设置默认值，防止缺失时报错
+    title: str = "分析组件"
     type: ComponentType
     layout: LayoutConfig
 
@@ -98,7 +104,7 @@ class DashboardComponent(BaseModel):
     chart_config: Optional[ChartConfig] = None
     insight_config: Optional[InsightCard] = None
 
-    # [关键修改] 联动定义
+    # 联动定义
     links: List[ComponentLink] = Field(default_factory=list, description="该组件触发的联动规则")
 
     interactions: List[str] = Field(default_factory=list, description="支持的交互行为列表")
@@ -112,12 +118,19 @@ class DashboardSchema(BaseModel):
     description: Optional[str] = None
 
     initial_view_state: Dict[str, Any] = Field(
-        default={"longitude": 121.47, "latitude": 31.23, "zoom": 11}
+        default={"longitude": -74.0, "latitude": 40.7, "zoom": 11}
+    )
+
+    # [新增] 全局时间范围：看板初始化或回溯时的时间状态
+    # 格式示例: ["2025-01-01 00:00:00", "2025-01-07 23:59:59"]
+    global_time_range: Optional[List[str]] = Field(
+        None,
+        description="看板当前的全局时间过滤范围"
     )
 
     components: List[DashboardComponent]
 
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
-        description="存储 last_code, snapshot_id 等关键上下文"
+        description="存储 last_code, snapshot_id, time_metadata 等关键上下文"
     )
