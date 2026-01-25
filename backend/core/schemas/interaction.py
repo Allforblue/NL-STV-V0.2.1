@@ -23,7 +23,7 @@ class InteractionPayload(BaseModel):
         description="交互触发来源类型"
     )
 
-    # 模态 1: 自然语言 (对应原型图底部的对话框)
+    # 模态 1: 自然 language (对应原型图底部的对话框)
     query: Optional[str] = Field(None, description="用户的文字指令，如 '分析这里的拥堵原因'")
 
     # 模态 2: UI 交互 (实现中间大地图与右侧图表的联动)
@@ -38,6 +38,12 @@ class InteractionPayload(BaseModel):
     selected_ids: Optional[List[Union[str, int]]] = Field(
         None,
         description="地图上点击选中的特定实体 ID 列表"
+    )
+
+    # [新增] 时间维度交互：支持时间范围过滤
+    time_range: Optional[List[str]] = Field(
+        None,
+        description="时间范围过滤 [开始时间, 结束时间]，例如 ['2025-01-01 08:00', '2025-01-01 10:00']"
     )
 
     # 模态 3: 历史回溯 (实现原型图左侧历史区域的需求)
