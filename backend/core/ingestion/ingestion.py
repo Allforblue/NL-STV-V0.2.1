@@ -35,8 +35,8 @@ class IngestionManager:
                     logger.info(f"Full loading: {path}")
                     df = loader.load(path)
                 else:
-                    logger.info(f"Sampling (200): {path}")
-                    df = loader.peek(path, n=200)
+                    logger.info(f"Sampling (10): {path}")
+                    df = loader.peek(path, n=10)
 
                 # --- [新增必要逻辑] 自动时间列转换 ---
                 # 预先转换 Datetime 对象，使得后续趋势分析中 resample() 速度提升 10 倍以上
