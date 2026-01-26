@@ -9,7 +9,7 @@ from core.profiler.semantic_analyzer import SemanticAnalyzer
 from core.profiler.relation_mapper import RelationMapper
 from core.profiler.interaction_mapper import InteractionMapper  # [新增]
 from core.generation.dashboard_planner import DashboardPlanner
-from core.generation.code_generator import CodeGenerator
+from core.generation.viz_generator import CodeGenerator
 from core.generation.viz_editor import VizEditor
 from core.execution.executor import CodeExecutor
 from core.execution.insight_extractor import InsightExtractor

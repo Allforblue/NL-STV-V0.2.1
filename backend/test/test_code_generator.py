@@ -28,9 +28,9 @@ sys.modules['core.llm.AI_client'] = MagicMock()
 # ==========================================
 # 我们需要导入 module 对象本身来做 patch.object
 # 根据你的截图，路径是 core.generation.code_generator
-from core.generation import code_generator
+from core.generation import viz_generator
 # 同时导入类方便实例化
-from core.generation.code_generator import CodeGenerator
+from core.generation.viz_generator import CodeGenerator
 
 
 class TestCodeGenerator(unittest.TestCase):
