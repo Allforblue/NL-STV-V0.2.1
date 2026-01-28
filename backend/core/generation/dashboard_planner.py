@@ -66,6 +66,13 @@ class DashboardPlanner:
 
         {layout_rules}
 
+        === 🚨 严格布局约束 (CRITICAL) 🚨 ===
+        1. 严禁使用 'left_sidebar' 或 'header'！只允许以下 Zone:
+           - "center_main": 只能放地图 (map)
+           - "right_sidebar": 放统计图表 (chart)
+           - "bottom_insight": 放洞察卡片 (insight)
+        2. 如果需要侧边栏分析，全部放入 "right_sidebar"。
+
         === 强制输出约束 ===
         每个组件(Component)必须严格包含以下字段，严禁缺失：
         1. "id", "title", "type", "layout"
@@ -166,7 +173,16 @@ class DashboardPlanner:
             components=[
                 DashboardComponent(
                     id="map_default", title="基础地理分布", type=ComponentType.MAP,
-                    layout=LayoutConfig(zone=LayoutZone.CENTER_MAIN)
+                    layout=LayoutConfig(zone=LayoutZone.CENTER_MAIN),
+                    # [修复] 必须添加 map_config，否则前端 Deck.gl 不会渲染
+                    map_config=[
+                        {
+                            "layer_id": "scatter_layer_fallback",
+                            "layer_type": "ScatterplotLayer",
+                            "data_api": "N/A",
+                            "opacity": 0.8
+                        }
+                    ]
                 ),
                 DashboardComponent(
                     id="chart_default", title="核心维度统计", type=ComponentType.CHART,
