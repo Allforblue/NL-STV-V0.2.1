@@ -115,16 +115,17 @@ class CodeExecutor:
 
                     try:
                         # 3.1 DataFrame 特征提取 (增强时间分析)
-                        if hasattr(res_obj, 'to_dict'):
+                        if isinstance(res_obj, (pd.DataFrame, pd.Series)):
                             # 基础描述统计
                             if len(res_obj) < 100:
-                                summary["data_raw"] = res_obj.to_dict()
+                                if hasattr(res_obj, 'to_dict'):
+                                    summary["data_raw"] = res_obj.to_dict()
                             else:
-                                desc = res_obj.describe(include='all').to_dict()
-                                summary["basic_stats"] = {k: v for k, v in desc.items() if isinstance(v, dict)}
+                                if hasattr(res_obj, 'describe'):
+                                    desc = res_obj.describe(include='all').to_dict()
+                                    summary["basic_stats"] = {k: v for k, v in desc.items() if isinstance(v, dict)}
 
                             # --- [核心新增] 时间序列特征捕捉 ---
-                            # 如果索引或列包含时间属性，提取波峰/波谷/趋势
                             target_df = res_obj if isinstance(res_obj, pd.DataFrame) else None
                             if target_df is not None:
                                 time_cols = [c for c in target_df.columns if
