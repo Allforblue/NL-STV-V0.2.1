@@ -28,7 +28,7 @@ NL-STV-V0.2.1
 │       │   └── insight_extractor.py
 │       ├── generation/
 │       │   ├── __init__.py
-│       │   ├── code_generator.py
+│       │   ├── viz_generator.py
 │       │   ├── dashboard_planner.py
 │       │   ├── scaffold.py
 │       │   ├── templates.py

@@ -35,7 +35,7 @@ class DashboardExecutionResult(BaseModel):
 
 class CodeExecutor:
     def __init__(self):
-        # 预加载常用库，防止 LLM 忘记 import 导致报错
+        # 预加载常用库，增加时空计算核心库，防止 LLM 忘记 import
         self.global_context = {
             "pd": pd,
             "gpd": gpd,
@@ -56,8 +56,18 @@ class CodeExecutor:
 
     def _make_serializable(self, obj: Any) -> Any:
         """
-        [增强] 递归将 Numpy/Pandas 类型转换为 Python 原生类型，防止序列化报错
+        [增强] 递归将 Numpy/Pandas 类型转换为 Python 原生类型。
+        [修复] 增加了对复杂对象（如 Plotly Figure）的拦截，防止深度递归破坏动画帧或引发卡顿。
         """
+        # 0. [核心修复] 拦截 Plotly 对象，使用官方序列化方法，防止内部的 frames 数组在下方递归中丢失
+        # if hasattr(obj, "to_plotly_json"):
+        #     return obj.to_plotly_json()
+
+        # [核心修复] 使用 to_dict() 替代 to_plotly_json()
+        # to_dict() 是 Plotly 最全的序列化方法，能确保 frames 不丢失
+        if hasattr(obj, "to_dict") and hasattr(obj, "layout") and hasattr(obj, "data"):
+            return obj.to_dict()
+
         # 1. 处理 Numpy 基础类型
         if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
             return int(obj)
@@ -66,15 +76,22 @@ class CodeExecutor:
             return float(obj)
         elif isinstance(obj, (np.bool_, bool)):
             return bool(obj)
-        # 2. [新增] 处理 Pandas 时间戳
-        elif isinstance(obj, pd.Timestamp):
-            return obj.isoformat()
-        # 3. 处理集合/数组
+
+        # 2. 处理 Pandas 时间戳与时间差
+        elif isinstance(obj, (pd.Timestamp, pd.Timedelta)):
+            return str(obj)
+
+        # 3. 处理地理几何对象接口 (为 InsightExtractor 提供描述)
+        elif hasattr(obj, "__geo_interface__"):
+            return "GEOMETRY_OBJECT"
+
+        # 4. 递归处理集合/数组
         elif isinstance(obj, np.ndarray):
             return self._make_serializable(obj.tolist())
         elif isinstance(obj, dict):
-            return {k: self._make_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
+            # 只有纯字典才深度清洗
+            return {str(k): self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple, set)):
             return [self._make_serializable(v) for v in obj]
         else:
             return obj
@@ -86,7 +103,7 @@ class CodeExecutor:
             component_ids: List[str]
     ) -> DashboardExecutionResult:
         """
-        执行看板逻辑并捕获多个组件结果，增加时间特征自动捕捉逻辑
+        执行看板逻辑并捕获多个组件结果，针对超大规模数据增强了统计稳定性。
         """
         clean_code = self._dedent_code(code_str)
         local_scope = {}
@@ -96,14 +113,25 @@ class CodeExecutor:
         sys.stdout = redirected_output
 
         try:
-            logger.info("Executing dashboard logic...")
+            logger.info(">>> [Executor] 启动沙箱执行环境...")
 
+            # [关键] 深度隔离数据上下文
+            # 确保在多表 Join 或空间计算时，不会通过引用修改 Session 原始数据
+            safe_data_context = {}
+            for k, v in data_context.items():
+                if hasattr(v, 'copy'):
+                    safe_data_context[k] = v.copy()
+                else:
+                    safe_data_context[k] = v
+
+            # 执行代码块
             exec(clean_code, self.global_context, local_scope)
 
             if "get_dashboard_data" not in local_scope:
-                raise ValueError("Generated code must contain 'get_dashboard_data(data_context)' function.")
+                raise ValueError("Generated code missing 'get_dashboard_data' function.")
 
-            all_results = local_scope["get_dashboard_data"](data_context)
+            # 调用生成函数
+            all_results = local_scope["get_dashboard_data"](safe_data_context)
 
             final_results = {}
             insight_payload = {}
@@ -114,62 +142,65 @@ class CodeExecutor:
                     summary = {}
 
                     try:
-                        # 3.1 DataFrame 特征提取 (增强时间分析)
-                        if isinstance(res_obj, (pd.DataFrame, pd.Series)):
-                            # 基础描述统计
-                            if len(res_obj) < 100:
-                                if hasattr(res_obj, 'to_dict'):
-                                    summary["data_raw"] = res_obj.to_dict()
-                            else:
-                                if hasattr(res_obj, 'describe'):
-                                    desc = res_obj.describe(include='all').to_dict()
-                                    summary["basic_stats"] = {k: v for k, v in desc.items() if isinstance(v, dict)}
+                        # 3.1 结构化数据特征提取 (DataFrame / GeoDataFrame)
+                        if isinstance(res_obj, (pd.DataFrame, pd.Series, gpd.GeoDataFrame)):
+                            row_count = len(res_obj)
+                            # 性能防护：对于超大规模数据，Insight 提取仅使用头部采样
+                            stats_df = res_obj if row_count < 100000 else res_obj.sample(100000)
 
-                            # --- [核心新增] 时间序列特征捕捉 ---
-                            target_df = res_obj if isinstance(res_obj, pd.DataFrame) else None
-                            if target_df is not None:
-                                time_cols = [c for c in target_df.columns if
-                                             pd.api.types.is_datetime64_any_dtype(target_df[c])]
-                                # 若索引是时间类型（resample 后的常态）
-                                is_time_index = pd.api.types.is_datetime64_any_dtype(target_df.index)
+                            if hasattr(res_obj, 'describe'):
+                                summary["basic_stats"] = self._make_serializable(
+                                    stats_df.describe(include='all').to_dict())
 
-                                if is_time_index or time_cols:
-                                    # 寻找数值列进行趋势分析
-                                    num_cols = target_df.select_dtypes(include=[np.number]).columns
-                                    if not num_cols.empty:
-                                        col = num_cols[0]
-                                        summary["temporal_insights"] = {
-                                            "max_value": target_df[col].max(),
-                                            "peak_time": str(target_df[col].idxmax()) if is_time_index else None,
-                                            "min_value": target_df[col].min(),
-                                            "valley_time": str(target_df[col].idxmin()) if is_time_index else None,
-                                            "overall_growth": float((target_df[col].iloc[-1] - target_df[col].iloc[0]) /
-                                                                    target_df[col].iloc[0]) if len(target_df) > 1 and
-                                                                                               target_df[col].iloc[
-                                                                                                   0] != 0 else 0
-                                        }
+                            summary["row_count"] = row_count
 
-                        # 3.2 Plotly Figure 特征提取
-                        elif hasattr(res_obj, 'data') and len(res_obj.data) > 0:
-                            trace = res_obj.data[0]
-                            trace_stats = {}
-                            for key in ['x', 'y', 'lat', 'lon', 'values']:
-                                if hasattr(trace, key) and getattr(trace, key) is not None:
-                                    arr = getattr(trace, key)
-                                    if hasattr(arr, '__len__'):
-                                        trace_stats[key] = {"count": len(arr)}
-                            if trace_stats: summary["figure_preview"] = trace_stats
+                            # --- [新增] 地理空间指纹提取 ---
+                            if isinstance(res_obj, gpd.GeoDataFrame) and not res_obj.empty:
+                                summary["spatial_info"] = {
+                                    "crs": str(res_obj.crs),
+                                    "geom_type": str(res_obj.geom_type.mode()[0]) if not res_obj.empty else None,
+                                    "bounds": [float(x) for x in res_obj.total_bounds]  # [minx, miny, maxx, maxy]
+                                }
 
-                        # 3.3 文本
-                        elif isinstance(res_obj, str):
-                            summary = {"text": res_obj[:200]}
+                            # --- [核心] 时间序列特征提取 ---
+                            # 识别时间列或时间索引
+                            time_cols = [c for c in res_obj.columns if
+                                         pd.api.types.is_datetime64_any_dtype(res_obj[c])] if isinstance(res_obj,
+                                                                                                         pd.DataFrame) else []
+                            is_time_index = pd.api.types.is_datetime64_any_dtype(res_obj.index)
+
+                            if is_time_index or time_cols:
+                                num_cols = res_obj.select_dtypes(include=[np.number]).columns
+                                if not num_cols.empty:
+                                    col = num_cols[0]
+                                    series = res_obj[col]
+                                    summary["temporal_insights"] = {
+                                        "peak_value": float(series.max()),
+                                        "valley_value": float(series.min()),
+                                        "start_time": str(
+                                            res_obj.index[0] if is_time_index else res_obj[time_cols[0]].min()),
+                                        "end_time": str(
+                                            res_obj.index[-1] if is_time_index else res_obj[time_cols[0]].max())
+                                    }
+
+                        # 3.2 可视化对象特征提取
+                        elif hasattr(res_obj, 'data') and isinstance(res_obj.data, (list, tuple)):
+                            if len(res_obj.data) > 0:
+                                trace = res_obj.data[0]
+                                summary["viz_type"] = type(res_obj).__name__
+                                # 记录数据点大致规模，辅助洞察生成
+                                for attr in ['x', 'lat', 'values']:
+                                    if hasattr(trace, attr) and getattr(trace, attr) is not None:
+                                        summary["data_points"] = len(getattr(trace, attr))
+                                        break
 
                     except Exception as e:
-                        logger.warning(f"Feature extraction warning for {cid}: {e}")
+                        logger.warning(f"Feature extraction failed for {cid}: {e}")
 
                     if summary:
                         insight_payload[cid] = summary
 
+                    # 这里的 res_obj 尚未执行 _make_serializable，保留了原始的 Figure 对象
                     final_results[cid] = ComponentResult(
                         component_id=cid,
                         data=res_obj,
@@ -177,6 +208,8 @@ class CodeExecutor:
                     )
 
             sys.stdout = old_stdout
+
+            # [关键修复生效处] 这里的清洗现在不会破坏 Plotly 动画帧了
             clean_results = self._make_serializable(final_results)
             clean_insight = self._make_serializable(insight_payload)
 
@@ -190,9 +223,14 @@ class CodeExecutor:
         except Exception:
             sys.stdout = old_stdout
             error_trace = traceback.format_exc()
-            logger.error(f"Execution Failed:\n{error_trace}")
+            logger.error(f"Sandbox Execution Failed:\n{error_trace}")
             return DashboardExecutionResult(
                 success=False,
                 error=error_trace,
                 code=clean_code
             )
+        finally:
+            sys.stdout = old_stdout
+            captured = redirected_output.getvalue()
+            if captured.strip():
+                logger.info(f"Sandbox Log Output:\n{captured.strip()}")

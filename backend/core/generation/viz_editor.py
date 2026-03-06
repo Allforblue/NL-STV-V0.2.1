@@ -10,16 +10,144 @@ logger = logging.getLogger(__name__)
 
 class VizEditor:
     """
-    可视化编辑器 (V2 联动增强版)：
-    负责根据用户的交互动作（点选、框选、指令）增量修改 Python 代码。
-    支持“联动响应”逻辑：即一个组件的动作如何影响其他组件的数据。
+    可视化编辑器 (V3.4 级联过滤版)：
+    1. [Cascade Filter] 实现从 地理表(BBox) -> ID列表 -> 业务表(ID) 的级联过滤。
+    2. [Auto Focus] 保持自动对焦逻辑。
+    3. [Fix] 彻底解决“地图变了但统计图没变”的问题。
     """
 
     def __init__(self, llm_client: AIClient):
         self.llm = llm_client
 
+    def _clean_previous_injections(self, code: str) -> str:
+        code = re.sub(r"\s*# \[FAST_FILTER_START\].*?# \[FAST_FILTER_END\]\n", "", code, flags=re.DOTALL)
+        code = re.sub(r"\s*# \[AUTOFOCUS_START\].*?# \[AUTOFOCUS_END\]\n", "", code, flags=re.DOTALL)
+        code = code.replace("_final_results = ", "")
+        code = code.replace("return _final_results", "")
+        return code
+
+    def _inject_v2_logic(self, code: str, payload: Any, summaries: List[Dict[str, Any]], links: List[Any]) -> str:
+        filter_lines = []
+
+        if payload.bbox and len(payload.bbox) == 4:
+            ln_min, lt_min, ln_max, lt_max = payload.bbox
+
+            # 1. 第一阶段：识别地理表和潜在的关联 ID 列
+            geo_vars = []
+            valid_id_cols = set()  # 存储可能用于关联的 ID 列名 (如 LocationID, zone_id)
+
+            for s in summaries:
+                var_name = s['variable_name']
+                is_geo = s.get('is_geospatial', False) or s.get('basic_stats', {}).get('is_geospatial', False)
+
+                # 尝试从语义元数据中寻找 ID 列
+                col_meta = s.get('semantic_analysis', {}).get('column_metadata', {})
+                id_col = next((c for c, m in col_meta.items() if m.get('semantic_tag') in ['ST_LOC_ID', 'ID_KEY']),
+                              None)
+
+                # 简单的启发式备选：如果列名包含 'id' 且unique值较多，也可能是关联键
+                if not id_col:
+                    cols = s.get('column_stats', {}).keys()
+                    candidates = [c for c in cols if 'id' in c.lower() and 'transaction' not in c.lower()]
+                    if candidates: id_col = candidates[0]
+
+                if is_geo:
+                    geo_vars.append({'name': var_name, 'id_col': id_col})
+                    if id_col: valid_id_cols.add(id_col)
+
+            # 2. 第二阶段：生成过滤代码
+            filter_lines.append(f"    # --- Cascading Spatial Filter ---")
+            filter_lines.append(f"    _valid_ids = set()")
+
+            # A. 先过滤地理表，并收集剩下的 ID
+            for g in geo_vars:
+                v = g['name']
+                id_c = g['id_col']
+                filter_lines.append(f"    if '{v}' in data_context:")
+                filter_lines.append(f"        _gdf = data_context['{v}'].copy()")
+                filter_lines.append(
+                    f"        if hasattr(_gdf, 'crs') and str(_gdf.crs) != 'EPSG:4326': _gdf = _gdf.to_crs(epsg=4326)")
+                # BBox 过滤
+                filter_lines.append(f"        _gdf = _gdf.cx[{ln_min}:{ln_max}, {lt_min}:{lt_max}]")
+                filter_lines.append(f"        data_context['{v}'] = _gdf")
+
+                # 收集 ID 用于级联
+                if id_c:
+                    filter_lines.append(f"        if '{id_c}' in _gdf.columns:")
+                    filter_lines.append(f"            _valid_ids.update(_gdf['{id_c}'].dropna().unique().tolist())")
+                    filter_lines.append(f"        elif _gdf.index.name == '{id_c}':")
+                    filter_lines.append(f"            _valid_ids.update(_gdf.index.tolist())")
+
+            # B. 再过滤非地理表 (业务表)，使用 ID 匹配
+            for s in summaries:
+                v = s['variable_name']
+                # 跳过已经处理过的地理表
+                if any(g['name'] == v for g in geo_vars): continue
+
+                # 寻找该表中的关联 ID 列
+                cols = s.get('column_stats', {}).keys()
+                # 这里的逻辑是：如果这个表里有一个列名，和我们在地理表中找到的 ID 列名一样（比如都叫 LocationID），那就过滤它
+                match_col = next((c for c in cols if c in valid_id_cols), None)
+
+                # 模糊匹配：如果没完全匹配，尝试找由 'location', 'zone' 组成的列
+                if not match_col:
+                    match_col = next(
+                        (c for c in cols if any(k in c.lower() for k in ['locationid', 'zone', 'pulocation'])), None)
+
+                if match_col:
+                    filter_lines.append(f"    if '{v}' in data_context and _valid_ids:")
+                    filter_lines.append(f"        _df_biz = data_context['{v}'].copy()")
+                    # 确保类型一致 (转字符串对比最安全)
+                    filter_lines.append(f"        if '{match_col}' in _df_biz.columns:")
+                    filter_lines.append(f"            # Cascade Filter on {match_col}")
+                    filter_lines.append(
+                        f"            data_context['{v}'] = _df_biz[_df_biz['{match_col}'].isin(_valid_ids)]")
+                    filter_lines.append(
+                        f"            print(f'[CASCADE] {v} filtered by IDs from {{len(_df_biz)}} to {{len(data_context[\"{v}\"])}}')")
+
+        if not filter_lines: return code
+
+        # 3. 注入代码 (函数头)
+        filter_block = "\n    # [FAST_FILTER_START]\n" + "\n".join(filter_lines) + "\n    # [FAST_FILTER_END]\n"
+        code = re.sub(r"(def get_dashboard_data\(data_context\):)", r"\1" + filter_block, code)
+
+        # 4. 注入对焦补丁
+        autofocus_logic = """
+    # [AUTOFOCUS_START]
+    for _id, _obj in _final_results.items():
+        if hasattr(_obj, 'layout') and 'mapbox' in _obj.layout:
+            _obj.layout.mapbox.center = None
+            _obj.layout.mapbox.zoom = None
+            _obj.update_layout(mapbox_style="carto-darkmatter")
+    return _final_results
+    # [AUTOFOCUS_END]
+        """
+
+        if "return " in code:
+            parts = code.rsplit("return ", 1)
+            code = parts[0] + "_final_results = " + parts[1].strip() + autofocus_logic
+
+        return code
+
+    # edit_dashboard_code 等方法保持不变...
+    async def edit_dashboard_code(self, original_code: str, payload: Any, summaries: List[Dict[str, Any]],
+                                  links: List[Any] = None) -> str:
+        clean_code = self._clean_previous_injections(original_code)
+        if payload.trigger_type == InteractionTriggerType.UI_ACTION and not payload.force_new:
+            return self._inject_v2_logic(clean_code, payload, summaries, links)
+
+        system_prompt = self._get_editor_prompt(clean_code, summaries)
+        user_prompt = f"=== 交互描述 ===\n触发源: {payload.trigger_type}\n指令: {payload.query}\n\n只输出 Python 代码。"
+
+        try:
+            raw_res = await self.llm.chat_async(
+                [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
+            return self._clean_markdown(raw_res)
+        except Exception as e:
+            logger.error(f"LLM Edit Failed: {e}")
+            return original_code
+
     def _clean_markdown(self, text: str) -> str:
-        """去除 Markdown 格式，提取纯 Python 代码"""
         if not text: return ""
         text = text.strip()
         text = re.sub(r"^```(python)?\s*", "", text, flags=re.IGNORECASE)
@@ -27,93 +155,4 @@ class VizEditor:
         return text.strip()
 
     def _get_editor_prompt(self, original_code: str, summaries: List[Dict[str, Any]]) -> str:
-        # 提取语义背景，方便 AI 知道哪个字段对应经纬度或 ID
-        context_str = ""
-        for s in summaries:
-            var_name = s.get('variable_name')
-            tags = s.get('semantic_analysis', {}).get('semantic_tags', {})
-            context_str += f"- 变量 `{var_name}` 语义标签: {json.dumps(tags, ensure_ascii=False)}\n"
-
-        return f"""
-你是一位资深时空数据工程师。你的任务是根据用户的交互动作（Interaction），对现有的分析代码进行【手术级】的增量修改。
-
-=== 现有代码 ===
-{original_code}
-
-=== 数据语义背景 ===
-{context_str}
-
-=== 强制约束 ===
-1. 保持函数签名不变：`def get_dashboard_data(data_context):`。
-2. 增量修改原则：
-   - 尽可能保留原有的变量定义和数据加载逻辑。
-   - 【核心】在聚合计算（groupby, count 等）之前，插入过滤代码。
-3. 空间过滤规则：
-   - 如果用户提供 BBox，优先使用 GeoPandas 的 `.cx[lon_min:lon_max, lat_min:lat_max]`。
-   - 确保坐标系一致，必要时调用 `df = df.to_crs(epsg=4326)`。
-4. 时间过滤规则：
-   - 如果用户提供 time_range，确保先使用 `pd.to_datetime()` 转换时间列。
-   - 使用布尔索引 `df[(df[col] >= start) & (df[col] <= end)]` 进行窗口切片。
-5. 联动响应规则：
-   - 如果是 UI 交互，请识别受影响的组件 ID。
-   - 只针对受影响的数据流进行修改，不要破坏其他无关组件。
-"""
-
-    def edit_dashboard_code(
-            self,
-            original_code: str,
-            payload: Any,  # InteractionPayload
-            summaries: List[Dict[str, Any]],
-            links: List[Any] = None  # 来自 DashboardSchema 的联动元数据
-    ) -> str:
-        """
-        核心方法：基于交互载荷编辑代码，实现语义钻取与联动。
-        """
-        system_prompt = self._get_editor_prompt(original_code, summaries)
-
-        # 1. 构造交互描述（告诉 AI 发生了什么）
-        interaction_desc = f"触发源类型: {payload.trigger_type}\n"
-
-        if payload.trigger_type == InteractionTriggerType.UI_ACTION:
-            interaction_desc += f"触发组件: `{payload.active_component_id}`\n"
-            if payload.bbox:
-                interaction_desc += f"动作：在地图上框选了范围 {payload.bbox}。请对受影响的数据流进行空间过滤(Spatially Filter)。\n"
-            if payload.selected_ids:
-                interaction_desc += f"动作：点击选中了 ID 列表 {payload.selected_ids}。请进行属性过滤(Attribute Filter)。\n"
-            if getattr(payload, 'time_range', None):
-                interaction_desc += f"动作：选择了时间范围 {payload.time_range}。请进行时间过滤(Temporal Filter)。\n"
-        else:
-            interaction_desc += f"自然语言指令: \"{payload.query}\"。请根据指令修改看板内容或分析维度。\n"
-
-        # 2. 注入联动上下文（告诉 AI 谁应该跟着变）
-        if links:
-            link_hints = "\n=== 联动规则提示 ===\n"
-            for link in links:
-                link_hints += f"- 当 `{payload.active_component_id}` 动作时，应过滤 `{link.target_id}` 的数据，关联键为 `{link.link_key}`。\n"
-            interaction_desc += link_hints
-
-        user_prompt = f"""
-=== 交互描述 ===
-{interaction_desc}
-
-=== 任务目标 ===
-请修改原有代码，使看板响应上述交互。
-如果涉及空间过滤，请务必在代码最开始的部分对相关的 GeoDataFrame 应用 `.cx` 过滤。
-如果涉及属性过滤，请使用 `df[df[key].isin(ids)]` 逻辑。
-如果涉及时间过滤，请确保将时间列转换为 datetime 格式后应用范围过滤。
-
-请只输出修改后的完整 Python 代码块。
-"""
-
-        logger.info(f">>> Editing code for interaction on: {payload.active_component_id or 'Chat'}")
-
-        try:
-            raw_response = self.llm.chat([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ], json_mode=False)
-
-            return self._clean_markdown(raw_response)
-        except Exception as e:
-            logger.error(f"Code editing failed: {e}")
-            return original_code  # 失败则返回原代码，保证系统不崩溃
+        return "You are a Data Engineer. Modify code based on interaction."

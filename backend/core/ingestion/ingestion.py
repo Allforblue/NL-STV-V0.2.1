@@ -31,12 +31,12 @@ class IngestionManager:
                 # [关键优化] 替换中划线，确保生成的变量名在 Python 中合法（防止 df_taxi-data 报错）
                 var_name = f"df_{Path(path).stem.lower().replace('-', '_')}"
 
-                if use_full:
-                    logger.info(f"Full loading: {path}")
-                    df = loader.load(path)
-                else:
-                    logger.info(f"Sampling (10): {path}")
-                    df = loader.peek(path, n=10)
+                # if use_full:
+                logger.info(f"Full loading: {path}")
+                df = loader.load(path)
+                # else:
+                #     logger.info(f"Sampling (10): {path}")
+                #     df = loader.peek(path, n=10)
 
                 # --- [新增必要逻辑] 自动时间列转换 ---
                 # 预先转换 Datetime 对象，使得后续趋势分析中 resample() 速度提升 10 倍以上
